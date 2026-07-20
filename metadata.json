@@ -1,0 +1,6 @@
+{
+  "name": "منصة ساس اللوجستية",
+  "description": "منصة وسيط شحن محلي تربط بين الشاحنين والناقلين وتوفر خدمات الدعم اللوجستي وتتبع وإصدار بوالص الشحن.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
