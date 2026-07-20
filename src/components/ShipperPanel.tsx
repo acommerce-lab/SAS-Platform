@@ -24,6 +24,7 @@ import {
   ShipmentStatus,
   Waybill 
 } from '../types';
+import MapPicker from './MapPicker';
 
 interface ShipperPanelProps {
   shipperUser: UserType;
@@ -72,10 +73,14 @@ export default function ShipperPanel({
   const [cliName, setCliName] = useState('');
   const [cliPhone, setCliPhone] = useState('');
   const [cliAddress, setCliAddress] = useState('');
+  const [cliLat, setCliLat] = useState(24.7136);
+  const [cliLng, setCliLng] = useState(46.6753);
 
   // Form states for Shipment Request
   const [reqClient, setReqClient] = useState('');
   const [reqLoadingLocation, setReqLoadingLocation] = useState('مستودعات الشاحن الرئيسية - الخرج طريق الملك فهد');
+  const [reqLoadingLat, setReqLoadingLat] = useState(24.1504);
+  const [reqLoadingLng, setReqLoadingLng] = useState(47.3072);
   const [reqProduct, setReqProduct] = useState('');
   const [reqQuantity, setReqQuantity] = useState('');
   const [reqTruckType, setReqTruckType] = useState('تبريد');
@@ -143,12 +148,16 @@ export default function ShipperPanel({
     onAddClient({
       name: cliName,
       phone: cliPhone,
-      address: cliAddress
+      address: cliAddress,
+      lat: cliLat,
+      lng: cliLng
     });
 
     setCliName('');
     setCliPhone('');
     setCliAddress('');
+    setCliLat(24.7136);
+    setCliLng(46.6753);
     setShowAddClientModal(false);
   };
 
@@ -171,6 +180,10 @@ export default function ShipperPanel({
     onAddShipmentRequest({
       clientReceiverId: reqClient,
       loadingLocation: reqLoadingLocation,
+      loadingLat: reqLoadingLat,
+      loadingLng: reqLoadingLng,
+      deliveryLat: selectedClientObj.lat,
+      deliveryLng: selectedClientObj.lng,
       productName: selectedProductObj.name,
       productType: selectedProductObj.type,
       productCategory: selectedProductObj.category,
@@ -323,15 +336,18 @@ export default function ShipperPanel({
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-slate-600 mb-1">موقع تحميل الشحنة الحالي *</label>
-                  <input
-                    type="text"
-                    required
+                <div className="border-t border-slate-200/60 pt-4">
+                  <MapPicker
+                    label="موقع تحميل وشحن البضائع على الخريطة *"
                     value={reqLoadingLocation}
-                    onChange={(e) => setReqLoadingLocation(e.target.value)}
-                    placeholder="موقع المصنع أو المستودع الرئيسي"
-                    className="w-full text-sm px-3 py-2 bg-white border border-slate-200 rounded-md focus:outline-slate-900"
+                    lat={reqLoadingLat}
+                    lng={reqLoadingLng}
+                    onChange={(address, lat, lng) => {
+                      setReqLoadingLocation(address);
+                      setReqLoadingLat(lat);
+                      setReqLoadingLng(lng);
+                    }}
+                    placeholder="ابحث عن مستودعك أو انقر لتحديد الموقع"
                   />
                 </div>
 
@@ -834,15 +850,18 @@ export default function ShipperPanel({
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">العنوان التفصيلي وموقع الاستلام *</label>
-                    <input
-                      type="text"
-                      required
+                  <div className="border-t border-slate-200/60 pt-4">
+                    <MapPicker
+                      label="موقع وتفاصيل عنوان الاستلام على الخريطة *"
                       value={cliAddress}
-                      onChange={(e) => setCliAddress(e.target.value)}
-                      placeholder="المدينة - الحي - الشارع الرئيسي"
-                      className="w-full text-sm px-3 py-2 bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:outline-slate-900"
+                      lat={cliLat}
+                      lng={cliLng}
+                      onChange={(address, lat, lng) => {
+                        setCliAddress(address);
+                        setCliLat(lat);
+                        setCliLng(lng);
+                      }}
+                      placeholder="ابحث عن المدينة/الحي أو انقر لتحديد الموقع"
                     />
                   </div>
 

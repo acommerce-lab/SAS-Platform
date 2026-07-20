@@ -59,6 +59,8 @@ export interface ShipperClient {
   name: string;
   phone: string;
   address: string;
+  lat?: number;
+  lng?: number;
 }
 
 export interface ShipmentRequest {
@@ -67,6 +69,10 @@ export interface ShipmentRequest {
   shipperName: string;
   clientReceiverId: string; // العميل المستلم
   loadingLocation: string; // موقع التحميل
+  loadingLat?: number;
+  loadingLng?: number;
+  deliveryLat?: number;
+  deliveryLng?: number;
   productName: string;
   productType: string;
   productCategory: string;

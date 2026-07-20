@@ -79,20 +79,59 @@ export default function AdminPanel({
     return shipments.filter(s => s.status === ShipmentStatus.PENDING_ASSIGNMENT);
   }, [shipments]);
 
-  // Simulated Google Maps Distance Calculator
+  // Google Maps Distance Calculator with mathematical Haversine backup
   const handleSimulateGoogleMaps = () => {
     if (!selectedShipment) return;
     setCalculatingDistance(true);
-    
-    // Simulate a call to Google Maps Distance Matrix
+
+    const { loadingLat, loadingLng, deliveryLat, deliveryLng } = selectedShipment;
+
+    // 1. If we have coordinates, check if standard Google Maps SDK is loaded
+    if (loadingLat && loadingLng && deliveryLat && deliveryLng) {
+      // @ts-ignore
+      if (window.google && window.google.maps) {
+        try {
+          // @ts-ignore
+          const service = new window.google.maps.DistanceMatrixService();
+          service.getDistanceMatrix({
+            origins: [{ lat: loadingLat, lng: loadingLng }],
+            destinations: [{ lat: deliveryLat, lng: deliveryLng }],
+            // @ts-ignore
+            travelMode: window.google.maps.TravelMode.DRIVING,
+          }, (response: any, status: any) => {
+            if (status === 'OK' && response?.rows?.[0]?.elements?.[0]?.distance) {
+              const meters = response.rows[0].elements[0].distance.value;
+              const km = Number((meters / 1000).toFixed(1));
+              setDistanceInput(km);
+              setCalculatingDistance(false);
+              setSelectedCarrierRow(null);
+            } else {
+              // Fallback to Haversine if Google Distance service returns error or not permitted
+              calculateHaversine(loadingLat, loadingLng, deliveryLat, deliveryLng);
+            }
+          });
+          return;
+        } catch (err) {
+          console.warn("Distance matrix service error:", err);
+          calculateHaversine(loadingLat, loadingLng, deliveryLat, deliveryLng);
+          return;
+        }
+      } else {
+        // Calculate mathematically with Haversine immediately
+        calculateHaversine(loadingLat, loadingLng, deliveryLat, deliveryLng);
+        return;
+      }
+    }
+
+    // 2. Fallback to smart textual estimation if coordinates are not available
     setTimeout(() => {
       let simulatedDist = 250; // default fallback
-      const address = selectedShipment.loadingLocation + " " + selectedShipment.productName;
+      const address = (selectedShipment.loadingLocation + " " + selectedShipment.productName).toLowerCase();
       
       // Smart estimates based on standard routes inside Saudi Arabia
       if (address.includes('جدة') || address.includes('الصفا')) {
         simulatedDist = 950;
-      } else if (address.includes('الدمام') || address.includes('الشرقية')) {
+      } else if (address.includes('الدمام') || address.includes('الشرقية') || address.includes('جبيل')) {
         simulatedDist = 410;
       } else if (address.includes('الخرج')) {
         simulatedDist = 85;
@@ -106,6 +145,23 @@ export default function AdminPanel({
       setCalculatingDistance(false);
       setSelectedCarrierRow(null); // Reset choice to force recalculating
     }, 800);
+  };
+
+  const calculateHaversine = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+    const R = 6371; // Earth's radius in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const d = R * c; // Distance in km
+    // Multiplied by 1.25 to estimate road winding/curves relative to straight line (Haversine)
+    const simulatedDist = Number((d * 1.25).toFixed(1));
+    setDistanceInput(simulatedDist);
+    setCalculatingDistance(false);
+    setSelectedCarrierRow(null);
   };
 
   // Find all trucks and drivers in system and calculate costs for each

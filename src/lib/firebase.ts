@@ -26,15 +26,16 @@ import {
 } from 'firebase/firestore';
 
 // Import config directly
+// @ts-ignore
 import config from '../../firebase-applet-config.json';
 
 const firebaseConfig = {
-  apiKey: config.apiKey,
-  authDomain: config.authDomain,
-  projectId: config.projectId,
-  storageBucket: config.storageBucket,
-  messagingSenderId: config.messagingSenderId,
-  appId: config.appId
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || (config ? config.apiKey : ''),
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || (config ? config.authDomain : ''),
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || (config ? config.projectId : ''),
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || (config ? config.storageBucket : ''),
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || (config ? config.messagingSenderId : ''),
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || (config ? config.appId : '')
 };
 
 // Initialize Firebase
