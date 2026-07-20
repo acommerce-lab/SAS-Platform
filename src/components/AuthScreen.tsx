@@ -55,11 +55,13 @@ export default function AuthScreen({
   const [tempUser, setTempUser] = useState<any>(null);
   const [authMode, setAuthMode] = useState<'LOGIN_2FA' | 'REGISTER_2FA'>('LOGIN_2FA');
   const [isLoading, setIsLoading] = useState(false);
-  const [showEmailPanel, setShowEmailPanel] = useState(true);
+  const [showEmailPanel, setShowEmailPanel] = useState(false);
+  const [smtpStatus, setSmtpStatus] = useState<{ success?: boolean; error?: string; message?: string } | null>(null);
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
+    setSmtpStatus(null);
 
     try {
       if (isRegistering) {
@@ -75,20 +77,37 @@ export default function AuthScreen({
         setTempUser({ name, email, phone, role: roleSelection, password });
         setAuthMode('REGISTER_2FA');
 
-        // Write virtual email document to Firestore
-        await addDoc(collection(db, 'virtual_emails'), {
-          toEmail: email,
-          subject: 'رمز تفعيل حساب ساس اللوجستي ومطابقة ترخيص النقل',
-          body: `مرحباً بك يا ${name} في منصة ساس اللوجستية الموحدة (SAS).
+        const emailSubject = 'رمز تفعيل حساب ساس اللوجستي ومطابقة ترخيص النقل';
+        const emailBody = `مرحباً بك يا ${name} في منصة ساس اللوجستية الموحدة (SAS).
 لقد قمت بطلب تسجيل حساب جديد كـ (${roleSelection === UserRole.SHIPPER ? 'شاحن بضائع' : 'ناقل بري'}).
 
 رمز التحقق الثنائي (2FA OTP) الخاص بك لتأكيد البريد وتفعيل الترخيص هو: ${code}
 
-يرجى إدخال هذا الرمز في المنصة لاستكمال التسجيل بوزارة النقل وهيئة الاتصالات.`,
+يرجى إدخال هذا الرمز في المنصة لاستكمال التسجيل بوزارة النقل وهيئة الاتصالات.`;
+
+        // Write virtual email document to Firestore as backup/history log
+        await addDoc(collection(db, 'virtual_emails'), {
+          toEmail: email,
+          subject: emailSubject,
+          body: emailBody,
           createdAt: new Date().toISOString(),
           isRead: false,
           type: 'verification'
         });
+
+        // Send real email using Gmail SMTP via our full-stack endpoint
+        try {
+          const smtpRes = await fetch('/api/send-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ toEmail: email, subject: emailSubject, body: emailBody })
+          });
+          const smtpData = await smtpRes.json();
+          setSmtpStatus(smtpData);
+        } catch (smtpErr) {
+          console.error("SMTP delivery failed:", smtpErr);
+          setSmtpStatus({ success: false, error: 'connection_error', message: 'تعذر الاتصال بخادم البريد لإرسال الكود.' });
+        }
         
         setShowVerificationStep(true);
 
@@ -148,20 +167,37 @@ export default function AuthScreen({
           setTempUser(profile);
           setAuthMode('LOGIN_2FA');
 
-          // Send virtual email for login 2FA
-          await addDoc(collection(db, 'virtual_emails'), {
-            toEmail: email,
-            subject: 'رمز الدخول الثنائي الموحد (2FA OTP) - منصة ساس',
-            body: `عزيزي شريك ساس اللوجستي (${profile.name})،
+          const emailSubject = 'رمز الدخول الثنائي الموحد (2FA OTP) - منصة ساس';
+          const emailBody = `عزيزي شريك ساس اللوجستي (${profile.name})،
 لقد تم كشف محاولة تسجيل دخول صحيحة برقمك السري.
 
 كود الدخول الثنائي الموحد والأمن للتحقق من هويتك هو: ${code}
 
-إذا لم تكن أنت من قام بهذه المحاولة، يرجى تغيير الرقم السري فوراً وإبلاغ إدارة الدعم الفني.`,
+إذا لم تكن أنت من قام بهذه المحاولة، يرجى تغيير الرقم السري فوراً وإبلاغ إدارة الدعم الفني.`;
+
+          // Send virtual email for login 2FA as backup
+          await addDoc(collection(db, 'virtual_emails'), {
+            toEmail: email,
+            subject: emailSubject,
+            body: emailBody,
             createdAt: new Date().toISOString(),
             isRead: false,
             type: 'verification'
           });
+
+          // Send real email using Gmail SMTP via our full-stack endpoint
+          try {
+            const smtpRes = await fetch('/api/send-email', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ toEmail: email, subject: emailSubject, body: emailBody })
+            });
+            const smtpData = await smtpRes.json();
+            setSmtpStatus(smtpData);
+          } catch (smtpErr) {
+            console.error("SMTP delivery failed:", smtpErr);
+            setSmtpStatus({ success: false, error: 'connection_error', message: 'تعذر الاتصال بخادم البريد لإرسال الكود.' });
+          }
 
           setShowVerificationStep(true);
         } else {
@@ -218,7 +254,7 @@ export default function AuthScreen({
         setIsLoading(false);
       }
     } else {
-      alert('رمز التحقق غير صحيح، يرجى نسخه من صندوق البريد السحابي وإدخاله بدقة.');
+      alert('رمز التحقق غير صحيح، يرجى التأكد من كتابة الكود المكون من 6 أرقام بشكل صحيح.');
       setIsLoading(false);
     }
   };
@@ -246,7 +282,7 @@ export default function AuthScreen({
           
           <p className="mt-1 text-center text-xs text-slate-500 font-medium leading-relaxed">
             {showVerificationStep 
-              ? 'أرسلنا كود OTP مكوّن من 6 أرقام إلى بريدك لحماية حسابك.' 
+              ? 'أرسلنا كود OTP مكوّن من 6 أرقام لحماية حسابك.' 
               : 'منصة ساس للوساطة اللوجستية شريك النقل السحابي البري المرخص'}
           </p>
         </div>
@@ -263,15 +299,66 @@ export default function AuthScreen({
           {/* 1. OTP Verification Panel */}
           {showVerificationStep ? (
             <form onSubmit={handleVerifyCode} className="space-y-6">
-              <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 flex items-start gap-3">
-                <Inbox className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-                <div className="text-xs text-amber-900 space-y-1">
-                  <span className="font-bold block">تم إرسال كود التحقق بنجاح!</span>
-                  <p className="leading-relaxed">
-                    لقد قمنا بمحاكاة إرسال بريد إلكتروني يحتوي على كود OTP. يرجى نسخه من <b>صندوق البريد السحابي</b> المفتوح بجانبك.
-                  </p>
+              
+              {smtpStatus?.success ? (
+                <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-200 flex items-start gap-3">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse mt-1.5 shrink-0" />
+                  <div className="text-xs text-emerald-900 space-y-1">
+                    <span className="font-bold block text-emerald-950">تم إرسال بريد حقيقي عبر Gmail SMTP! ✅</span>
+                    <p className="leading-relaxed">
+                      لقد تم إرسال الرمز بنجاح إلى بريدك الإلكتروني المدخل: <strong className="font-mono">{email}</strong>. يرجى التحقق من صندوق الوارد أو البريد المهمل (Spam).
+                    </p>
+                  </div>
                 </div>
-              </div>
+              ) : smtpStatus?.error === 'credentials_missing' ? (
+                <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 flex items-start gap-3">
+                  <MailWarning className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="text-xs text-amber-900 space-y-1">
+                    <span className="font-bold block text-amber-950">تم إنشاء الكود (لم يتم إرسال بريد خارجي) ⚠️</span>
+                    <p className="leading-relaxed text-[11px]">
+                      منصة ساس مهيأة لإرسال بريد حقيقي، ولكن لم يتم إعداد المتغيرات <code>GMAIL_USER</code> و <code>GMAIL_APP_PASSWORD</code> في الإعدادات بعد.
+                    </p>
+                    <div className="pt-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setShowEmailPanel(!showEmailPanel)}
+                        className="text-[11px] text-amber-900 font-extrabold underline hover:text-amber-800"
+                      >
+                        {showEmailPanel ? 'إخفاء صندوق البريد المساعد ❌' : 'إظهار صندوق البريد المساعد لاستعراض الكود 🔓'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : smtpStatus ? (
+                <div className="bg-red-50 p-4 rounded-xl border border-red-200 flex items-start gap-3">
+                  <MailWarning className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+                  <div className="text-xs text-red-900 space-y-1">
+                    <span className="font-bold block text-red-950">فشل الاتصال بـ Gmail SMTP ❌</span>
+                    <p className="leading-relaxed text-[11px]">
+                      حدث خطأ أثناء محاولة إرسال البريد الإلكتروني. تأكد من صحة البريد المدخل ومفتاح مرور التطبيق.
+                    </p>
+                    <div className="pt-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setShowEmailPanel(!showEmailPanel)}
+                        className="text-[11px] text-red-900 font-extrabold underline hover:text-red-800"
+                      >
+                        {showEmailPanel ? 'إخفاء صندوق البريد المساعد ❌' : 'إظهار صندوق البريد المساعد لاستعراض الكود 🔓'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 flex items-start gap-3">
+                  <Inbox className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="text-xs text-amber-900 space-y-1">
+                    <span className="font-bold block">جاري معالجة إرسال الرمز...</span>
+                    <p className="leading-relaxed">
+                      يتم الآن إرسال البريد الإلكتروني الثنائي الموحد. يرجى الانتظار ثواني معدودة.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">رمز التحقق المكون من 6 أرقام *</label>

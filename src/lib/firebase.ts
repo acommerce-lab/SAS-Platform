@@ -29,13 +29,15 @@ import {
 // @ts-ignore
 import config from '../../firebase-applet-config.json';
 
+const metaEnv = (import.meta as any).env || {};
+
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || (config ? config.apiKey : ''),
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || (config ? config.authDomain : ''),
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || (config ? config.projectId : ''),
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || (config ? config.storageBucket : ''),
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || (config ? config.messagingSenderId : ''),
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || (config ? config.appId : '')
+  apiKey: metaEnv.VITE_FIREBASE_API_KEY || (config ? config.apiKey : ''),
+  authDomain: metaEnv.VITE_FIREBASE_AUTH_DOMAIN || (config ? config.authDomain : ''),
+  projectId: metaEnv.VITE_FIREBASE_PROJECT_ID || (config ? config.projectId : ''),
+  storageBucket: metaEnv.VITE_FIREBASE_STORAGE_BUCKET || (config ? config.storageBucket : ''),
+  messagingSenderId: metaEnv.VITE_FIREBASE_MESSAGING_SENDER_ID || (config ? config.messagingSenderId : ''),
+  appId: metaEnv.VITE_FIREBASE_APP_ID || (config ? config.appId : '')
 };
 
 // Initialize Firebase
