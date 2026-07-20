@@ -23,12 +23,17 @@ import {
   addDoc, 
   doc, 
   setDoc, 
-  getDoc,
+  safeGetDoc,
   signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword 
+  createUserWithEmailAndPassword,
+  query,
+  where,
+  getDocs
 } from '../lib/firebase';
 import { defaultUsers } from '../data';
+import { getVerificationEmailHtml, getLogin2FAEmailHtml } from '../lib/emailTemplates';
 import VirtualEmailHub from './VirtualEmailHub';
+import config from '../../firebase-applet-config.json';
 
 interface AuthScreenProps {
   onLoginSuccess: (user: UserType) => void;
@@ -58,17 +63,93 @@ export default function AuthScreen({
   const [showEmailPanel, setShowEmailPanel] = useState(false);
   const [smtpStatus, setSmtpStatus] = useState<{ success?: boolean; error?: string; message?: string } | null>(null);
 
+  // State for configuration/setup error (e.g. auth/configuration-not-found)
+  const [authConfigError, setAuthConfigError] = useState<{ hasError: boolean; type?: 'CONFIG_MISSING' | 'OTHER'; message?: string } | null>(null);
+  
+  // Localized error message display for forms (avoids browser alert/confirm popup limitations)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  
+  // State to determine if we should bypass Firebase Auth and use Direct Firestore mode
+  const [useVirtualAuth, setUseVirtualAuth] = useState(() => {
+    return localStorage.getItem('sas_virtual_auth_mode') === 'true';
+  });
+
+  const handleVirtualLogin = async () => {
+    let foundUser: UserType | null = null;
+    const usersRef = collection(db, 'users');
+    const q = query(usersRef, where('email', '==', email));
+    const querySnapshot = await getDocs(q);
+    
+    if (!querySnapshot.empty) {
+      const docData = querySnapshot.docs[0].data();
+      const userDoc = docData as UserType & { virtualPassword?: string };
+      
+      // Check password
+      const expectedPassword = userDoc.virtualPassword || '123456'; // Default password for seeded users is 123456
+      if (expectedPassword === password) {
+        foundUser = userDoc;
+      } else {
+        throw { code: 'auth/wrong-password', message: 'كلمة المرور غير صحيحة.' };
+      }
+    } else {
+      // Check if it's one of the default pre-seeded users that hasn't been written to Firestore yet
+      const defaultUser = defaultUsers.find(u => u.email === email);
+      if (defaultUser) {
+        if (password === '123456') {
+          // Auto-seed into Firestore to simulate real document
+          foundUser = {
+            ...defaultUser,
+            createdAt: new Date().toISOString()
+          };
+          await setDoc(doc(db, 'users', defaultUser.id), {
+            ...foundUser,
+            virtualPassword: '123456'
+          });
+        } else {
+          throw { code: 'auth/wrong-password', message: 'كلمة المرور غير صحيحة.' };
+        }
+      } else {
+        throw { code: 'auth/user-not-found', message: 'المستخدم غير مسجل بالمنصة.' };
+      }
+    }
+    
+    return foundUser;
+  };
+
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setSmtpStatus(null);
+    setAuthConfigError(null);
+    setErrorMessage(null);
 
     try {
       if (isRegistering) {
         if (!name || !email || !phone || !password) {
-          alert('يرجى تعبئة جميع الحقول المطلوبة للتسجيل.');
+          setErrorMessage('يرجى تعبئة جميع الحقول المطلوبة للتسجيل.');
           setIsLoading(false);
           return;
+        }
+
+        // Check if email already exists (runs always to catch duplicates before 2FA starts)
+        try {
+          const usersRef = collection(db, 'users');
+          const q = query(usersRef, where('email', '==', email));
+          const querySnapshot = await getDocs(q);
+          if (!querySnapshot.empty) {
+            setErrorMessage('البريد الإلكتروني المدخل مسجل بالفعل بالمنصة. يرجى استخدام صفحة تسجيل الدخول بدلاً من ذلك.');
+            setIsLoading(false);
+            return;
+          }
+        } catch (dbErr: any) {
+          console.error("Database check failed:", dbErr);
+          if (dbErr.message?.includes('offline') || dbErr.message?.includes('unreachable') || dbErr.message?.includes('network')) {
+            setErrorMessage('فشل الاتصال بخادم قاعدة البيانات (الجهاز غير متصل بالإنترنت حالياً). يرجى التبديل لـ "وضع المحاكاة اللوجستية" من الزر بالأعلى لتجربة المنصة فوراً دون إنترنت.');
+            setIsLoading(false);
+            return;
+          } else {
+            throw dbErr;
+          }
         }
 
         // Generate a 6-digit OTP code for simulation
@@ -77,7 +158,7 @@ export default function AuthScreen({
         setTempUser({ name, email, phone, role: roleSelection, password });
         setAuthMode('REGISTER_2FA');
 
-        const emailSubject = 'رمز تفعيل حساب ساس اللوجستي ومطابقة ترخيص النقل';
+        const emailSubject = '🔑 رمز تفعيل حساب ساس اللوجستي الموحد';
         const emailBody = `مرحباً بك يا ${name} في منصة ساس اللوجستية الموحدة (SAS).
 لقد قمت بطلب تسجيل حساب جديد كـ (${roleSelection === UserRole.SHIPPER ? 'شاحن بضائع' : 'ناقل بري'}).
 
@@ -85,31 +166,42 @@ export default function AuthScreen({
 
 يرجى إدخال هذا الرمز في المنصة لاستكمال التسجيل بوزارة النقل وهيئة الاتصالات.`;
 
-        // Write virtual email document to Firestore as backup/history log
-        await addDoc(collection(db, 'virtual_emails'), {
+        const roleName = roleSelection === UserRole.SHIPPER ? 'شاحن بضائع (تاجر جملة)' : 'ناقل بري (شركة خدمات نقليات)';
+        const emailHtml = getVerificationEmailHtml(name, roleName, code);
+
+        // Write virtual email document to Firestore as backup/history log (non-blocking)
+        addDoc(collection(db, 'virtual_emails'), {
           toEmail: email,
           subject: emailSubject,
           body: emailBody,
           createdAt: new Date().toISOString(),
           isRead: false,
           type: 'verification'
-        });
+        }).catch(err => console.error("Firestore backup failed:", err));
 
-        // Send real email using Gmail SMTP via our full-stack endpoint
-        try {
-          const smtpRes = await fetch('/api/send-email', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ toEmail: email, subject: emailSubject, body: emailBody })
-          });
+        // Show verification step instantly so user is not stuck on loading screen
+        setShowVerificationStep(true);
+        setIsLoading(false);
+
+        // Send real email using Gmail SMTP via our full-stack endpoint (in the background)
+        fetch('/api/send-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            toEmail: email, 
+            subject: emailSubject, 
+            body: emailBody,
+            html: emailHtml
+          })
+        })
+        .then(async (smtpRes) => {
           const smtpData = await smtpRes.json();
           setSmtpStatus(smtpData);
-        } catch (smtpErr) {
+        })
+        .catch((smtpErr) => {
           console.error("SMTP delivery failed:", smtpErr);
           setSmtpStatus({ success: false, error: 'connection_error', message: 'تعذر الاتصال بخادم البريد لإرسال الكود.' });
-        }
-        
-        setShowVerificationStep(true);
+        });
 
       } else {
         // Login
@@ -123,38 +215,66 @@ export default function AuthScreen({
         let profile: UserType | null = null;
 
         try {
-          const userCredential = await signInWithEmailAndPassword(auth, email, password);
-          authenticatedUser = userCredential.user;
-          
-          // Get profile
-          const userDoc = await getDoc(doc(db, 'users', authenticatedUser.uid));
-          if (userDoc.exists()) {
-            profile = userDoc.data() as UserType;
+          if (useVirtualAuth) {
+            profile = await handleVirtualLogin();
           } else {
-            // Create profile if missing
-            profile = {
-              id: authenticatedUser.uid,
-              email: authenticatedUser.email || email,
-              name: email.split('@')[0],
-              phone: '0500000000',
-              role: email.includes('admin') ? UserRole.ADMIN : (email.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER),
-              isVerified: true,
-              createdAt: new Date().toISOString()
-            };
-            await setDoc(doc(db, 'users', authenticatedUser.uid), profile);
+            const userCredential = await signInWithEmailAndPassword(auth, email, password);
+            authenticatedUser = userCredential.user;
+            
+            // Get profile
+            const userDoc = await safeGetDoc(doc(db, 'users', authenticatedUser.uid));
+            if (userDoc && userDoc.exists()) {
+              profile = userDoc.data() as UserType;
+            } else {
+              // Create profile if missing
+              profile = {
+                id: authenticatedUser.uid,
+                email: authenticatedUser.email || email,
+                name: email.split('@')[0],
+                phone: '0500000000',
+                role: email.includes('admin') ? UserRole.ADMIN : (email.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER),
+                isVerified: true,
+                createdAt: new Date().toISOString()
+              };
+              await setDoc(doc(db, 'users', authenticatedUser.uid), profile);
+            }
           }
         } catch (authErr: any) {
+          // Check for config missing error
+          if (authErr.code === 'auth/configuration-not-found' || authErr.message?.includes('configuration-not-found')) {
+            setAuthConfigError({
+              hasError: true,
+              type: 'CONFIG_MISSING',
+              message: 'لم يتم تفعيل تسجيل الدخول بالبريد الإلكتروني وكلمة المرور في مشروع Firebase الخاص بك.'
+            });
+            setIsLoading(false);
+            return;
+          }
+
           // If default user, auto-register them to simplify the demo process
           const defaultUser = defaultUsers.find(u => u.email === email);
           if (defaultUser && (authErr.code === 'auth/user-not-found' || authErr.code === 'auth/invalid-credential')) {
             console.log('Pre-seeded user logging in for first time. Registering in Firebase Auth...');
-            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-            profile = {
-              ...defaultUser,
-              id: userCredential.user.uid,
-              createdAt: new Date().toISOString()
-            };
-            await setDoc(doc(db, 'users', userCredential.user.uid), profile);
+            try {
+              const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+              profile = {
+                ...defaultUser,
+                id: userCredential.user.uid,
+                createdAt: new Date().toISOString()
+              };
+              await setDoc(doc(db, 'users', userCredential.user.uid), profile);
+            } catch (regErr: any) {
+              if (regErr.code === 'auth/configuration-not-found' || regErr.message?.includes('configuration-not-found')) {
+                setAuthConfigError({
+                  hasError: true,
+                  type: 'CONFIG_MISSING',
+                  message: 'لم يتم تفعيل تسجيل الدخول بالبريد الإلكتروني وكلمة المرور في مشروع Firebase الخاص بك.'
+                });
+                setIsLoading(false);
+                return;
+              }
+              throw regErr;
+            }
           } else {
             throw authErr;
           }
@@ -167,7 +287,7 @@ export default function AuthScreen({
           setTempUser(profile);
           setAuthMode('LOGIN_2FA');
 
-          const emailSubject = 'رمز الدخول الثنائي الموحد (2FA OTP) - منصة ساس';
+          const emailSubject = '🔐 رمز الدخول الثنائي الموحد (2FA) - منصة ساس';
           const emailBody = `عزيزي شريك ساس اللوجستي (${profile.name})،
 لقد تم كشف محاولة تسجيل دخول صحيحة برقمك السري.
 
@@ -175,43 +295,65 @@ export default function AuthScreen({
 
 إذا لم تكن أنت من قام بهذه المحاولة، يرجى تغيير الرقم السري فوراً وإبلاغ إدارة الدعم الفني.`;
 
-          // Send virtual email for login 2FA as backup
-          await addDoc(collection(db, 'virtual_emails'), {
+          const emailHtml = getLogin2FAEmailHtml(profile.name, code);
+
+          // Send virtual email for login 2FA as backup (non-blocking)
+          addDoc(collection(db, 'virtual_emails'), {
             toEmail: email,
             subject: emailSubject,
             body: emailBody,
             createdAt: new Date().toISOString(),
             isRead: false,
             type: 'verification'
-          });
+          }).catch(err => console.warn("Firestore virtual email backup deferred (offline):", err));
 
-          // Send real email using Gmail SMTP via our full-stack endpoint
-          try {
-            const smtpRes = await fetch('/api/send-email', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ toEmail: email, subject: emailSubject, body: emailBody })
-            });
+          // Show verification step instantly so user is not stuck on loading screen
+          setShowVerificationStep(true);
+          setIsLoading(false);
+
+          // Send real email using Gmail SMTP via our full-stack endpoint (in the background)
+          fetch('/api/send-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              toEmail: email, 
+              subject: emailSubject, 
+              body: emailBody,
+              html: emailHtml
+            })
+          })
+          .then(async (smtpRes) => {
             const smtpData = await smtpRes.json();
             setSmtpStatus(smtpData);
-          } catch (smtpErr) {
-            console.error("SMTP delivery failed:", smtpErr);
+          })
+          .catch((smtpErr) => {
+            console.warn("SMTP delivery failed (expected in offline/local environments):", smtpErr);
             setSmtpStatus({ success: false, error: 'connection_error', message: 'تعذر الاتصال بخادم البريد لإرسال الكود.' });
-          }
+          });
 
-          setShowVerificationStep(true);
         } else {
-          alert('تعذر استرداد ملفك الشخصي من ساس. يرجى مراجعة الإدارة.');
+          setErrorMessage('تعذر استرداد ملفك الشخصي من ساس. يرجى مراجعة الإدارة.');
         }
       }
     } catch (err: any) {
-      console.error(err);
-      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
-        alert('كلمة المرور أو البريد الإلكتروني غير صحيح، يرجى المحاولة مرة أخرى.');
-      } else if (err.code === 'auth/invalid-email') {
-        alert('صيغة البريد الإلكتروني المدخل غير صحيحة.');
+      if (err.message?.includes('offline') || err.message?.includes('network') || err.message?.includes('unreachable')) {
+        console.warn("Authentication network warning (offline/unreachable):", err);
+        setErrorMessage('يبدو أنك غير متصل بالإنترنت حالياً، أو أن خوادم قاعدة البيانات غير متوفرة. يرجى التبديل لـ "وضع المحاكاة اللوجستية" من الزر بالأعلى لتجربة المنصة فوراً دون إنترنت.');
       } else {
-        alert('حدث خطأ أثناء الاتصال بالخادم السحابي: ' + (err.message || err));
+        console.error("Authentication error occurred:", err);
+        if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+          setErrorMessage('كلمة المرور أو البريد الإلكتروني غير صحيح، يرجى المحاولة مرة أخرى.');
+        } else if (err.code === 'auth/invalid-email') {
+          setErrorMessage('صيغة البريد الإلكتروني المدخل غير صحيحة.');
+        } else if (err.code === 'auth/configuration-not-found' || err.message?.includes('configuration-not-found')) {
+          setAuthConfigError({
+            hasError: true,
+            type: 'CONFIG_MISSING',
+            message: 'لم يتم تفعيل تسجيل الدخول بالبريد الإلكتروني وكلمة المرور في مشروع Firebase الخاص بك.'
+          });
+        } else {
+          setErrorMessage('حدث خطأ أثناء الاتصال بالخادم السحابي: ' + (err.message || err));
+        }
       }
     } finally {
       setIsLoading(false);
@@ -221,40 +363,86 @@ export default function AuthScreen({
   const handleVerifyCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
+    setErrorMessage(null);
 
     if (verificationCode === generatedCode) {
       try {
         if (authMode === 'REGISTER_2FA') {
-          // Complete Registration in Firebase Auth
-          const userCredential = await createUserWithEmailAndPassword(auth, tempUser.email, tempUser.password);
-          
-          const newUser: UserType = {
-            id: userCredential.user.uid,
-            email: tempUser.email,
-            name: tempUser.name,
-            phone: tempUser.phone,
-            role: tempUser.role,
-            isVerified: true,
-            createdAt: new Date().toISOString()
-          };
+          let newUser: UserType;
+          if (useVirtualAuth) {
+            const virtualUid = 'virtual_' + Math.random().toString(36).substring(2, 11);
+            newUser = {
+              id: virtualUid,
+              email: tempUser.email,
+              name: tempUser.name,
+              phone: tempUser.phone,
+              role: tempUser.role,
+              isVerified: true,
+              createdAt: new Date().toISOString()
+            };
+            // Save profile with virtual password in Firestore
+            try {
+              await setDoc(doc(db, 'users', virtualUid), {
+                ...newUser,
+                virtualPassword: tempUser.password
+              });
+            } catch (dbErr) {
+              console.warn("Could not save virtual user to database (offline):", dbErr);
+            }
+            
+            // Save in localStorage to persist login state
+            localStorage.setItem('sas_virtual_user', JSON.stringify(newUser));
+            onLoginSuccess(newUser);
+          } else {
+            // Complete Registration in Firebase Auth
+            const userCredential = await createUserWithEmailAndPassword(auth, tempUser.email, tempUser.password);
+            
+            newUser = {
+              id: userCredential.user.uid,
+              email: tempUser.email,
+              name: tempUser.name,
+              phone: tempUser.phone,
+              role: tempUser.role,
+              isVerified: true,
+              createdAt: new Date().toISOString()
+            };
 
-          // Save profile
-          await setDoc(doc(db, 'users', userCredential.user.uid), newUser);
-          
-          onRegisterSuccess(newUser);
+            // Save profile
+            try {
+              await setDoc(doc(db, 'users', userCredential.user.uid), newUser);
+            } catch (dbErr) {
+              console.warn("Could not save profile document to database (offline):", dbErr);
+            }
+            onRegisterSuccess(newUser);
+          }
         } else {
           // Login 2FA Success
+          if (useVirtualAuth) {
+            localStorage.setItem('sas_virtual_user', JSON.stringify(tempUser));
+          }
           onLoginSuccess(tempUser);
         }
         setShowVerificationStep(false);
       } catch (err: any) {
         console.error("Error finalizing auth:", err);
-        alert('حدث خطأ أثناء حفظ الملف الشخصي: ' + (err.message || err));
+        if (err.code === 'auth/configuration-not-found' || err.message?.includes('configuration-not-found')) {
+          setAuthConfigError({
+            hasError: true,
+            type: 'CONFIG_MISSING',
+            message: 'لم يتم تفعيل تسجيل الدخول بالبريد الإلكتروني وكلمة المرور في مشروع Firebase الخاص بك.'
+          });
+        } else if (err.code === 'auth/email-already-in-use' || err.message?.includes('email-already-in-use')) {
+          setErrorMessage('هذا الحساب مسجل بالفعل بالمنصة. يرجى استخدام صفحة تسجيل الدخول.');
+        } else if (err.message?.includes('offline') || err.message?.includes('network-request-failed')) {
+          setErrorMessage('يبدو أنك غير متصل بالإنترنت حالياً، أو أن خوادم قاعدة البيانات غير متوفرة. يرجى التبديل لـ "وضع المحاكاة اللوجستية السريعة" لتخطي الحماية وتجربة المنصة.');
+        } else {
+          setErrorMessage('حدث خطأ أثناء حفظ الملف الشخصي: ' + (err.message || err));
+        }
       } finally {
         setIsLoading(false);
       }
     } else {
-      alert('رمز التحقق غير صحيح، يرجى التأكد من كتابة الكود المكون من 6 أرقام بشكل صحيح.');
+      setErrorMessage('رمز التحقق غير صحيح، يرجى التأكد من كتابة الكود المكون من 6 أرقام بشكل صحيح.');
       setIsLoading(false);
     }
   };
@@ -287,7 +475,7 @@ export default function AuthScreen({
           </p>
         </div>
 
-        <div className="bg-white py-8 px-6 shadow-xl rounded-2xl border border-slate-200/80">
+        <div className="bg-white py-8 px-6 shadow-xl rounded-2xl border border-slate-200/80 relative">
           
           {isLoading && (
             <div className="absolute inset-0 bg-white/70 backdrop-blur-xs flex flex-col items-center justify-center z-50 rounded-2xl">
@@ -296,10 +484,104 @@ export default function AuthScreen({
             </div>
           )}
 
-          {/* 1. OTP Verification Panel */}
-          {showVerificationStep ? (
+          {/* Mode Switcher Badge */}
+          <div className="flex justify-end mb-4">
+            <button
+              type="button"
+              onClick={() => {
+                const targetMode = !useVirtualAuth;
+                localStorage.setItem('sas_virtual_auth_mode', targetMode ? 'true' : 'false');
+                setUseVirtualAuth(targetMode);
+                setAuthConfigError(null);
+              }}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-extrabold transition-all border ${
+                useVirtualAuth 
+                  ? 'bg-amber-50 text-amber-900 border-amber-200 shadow-xs' 
+                  : 'bg-emerald-50 text-emerald-900 border-emerald-200'
+              }`}
+            >
+              <div className={`w-1.5 h-1.5 rounded-full ${useVirtualAuth ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
+              {useVirtualAuth ? 'وضع المحاكاة السحابية السريعة' : 'وضع الاتصال السحابي المباشر'}
+              <span className="text-[9px] text-slate-400 font-normal underline hover:text-slate-600 mr-1">(تبديل)</span>
+            </button>
+          </div>
+
+          {authConfigError?.hasError ? (
+            <div className="space-y-6 text-right animate-in fade-in duration-300">
+              <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-950 space-y-1">
+                  <span className="font-extrabold text-sm block text-amber-950">⚠️ تفعيل حماية تسجيل الدخول (Firebase Auth)</span>
+                  <p className="leading-relaxed text-[11.5px]">
+                    منصة ساس اللوجستية مهيأة للعمل بنظام حماية سحابي متكامل. لكي يعمل تسجيل الدخول والتحقق بشكل سحابي مباشر بالكامل، يجب تفعيل خيار <b>Email/Password</b> في لوحة تحكم مشروعك.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <h4 className="text-xs font-extrabold text-slate-800">📋 خطوات التفعيل السريعة بـ Firebase:</h4>
+                <ol className="text-[11px] text-slate-600 space-y-2 list-decimal pr-4 leading-relaxed">
+                  <li>
+                    انتقل إلى صفحة مزودي الخدمة في لوحة تحكم Firebase بمشروعك:<br />
+                    <a 
+                      href={`https://console.firebase.google.com/project/${config ? config.projectId : 'asharesa'}/authentication/providers`}
+                      target="_blank" 
+                      rel="noopener noreferrer" 
+                      className="text-amber-800 font-bold underline break-all inline-flex items-center gap-1 hover:text-amber-700"
+                    >
+                      فتح صفحة الإعدادات بمشروع {config ? config.projectId : 'asharesa'} ↗
+                    </a>
+                  </li>
+                  <li>اضغط على زر <b>Add new provider</b> (إضافة مزود جديد).</li>
+                  <li>اختر <b>Email/Password</b> (البريد الإلكتروني وكلمة المرور).</li>
+                  <li>قم بتفعيل خيار <b>Enable</b> ثم اضغط على حفظ <b>Save</b>.</li>
+                </ol>
+              </div>
+
+              <div className="border-t border-slate-100 pt-4 space-y-3">
+                <span className="text-xs font-bold text-slate-700 block">⚡ أو الاستمرار بوضع المحاكاة لتجربة فورية:</span>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  إذا كنت ترغب بمعاينة المنصة فوراً وتجاوز ضبط إعدادات الحماية دون تأثير على البيانات السحابية، يمكنك التبديل لوضع المحاكاة السحابية اللوجستية وتجاوز الخطوة الآن.
+                </p>
+                
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.setItem('sas_virtual_auth_mode', 'true');
+                    setUseVirtualAuth(true);
+                    setAuthConfigError(null);
+                  }}
+                  className="w-full flex justify-center items-center gap-2 py-2.5 px-4 rounded-lg shadow-sm text-xs font-extrabold text-white bg-amber-600 hover:bg-amber-700 transition-colors cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  تجاوز مفعّل 🚀 الاستمرار بوضع المحاكاة السحابية
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthConfigError(null);
+                  }}
+                  className="w-full flex justify-center items-center gap-2 py-2 px-4 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  إعادة المحاولة بعد التفعيل في لوحة التحكم
+                </button>
+              </div>
+            </div>
+          ) : showVerificationStep ? (
             <form onSubmit={handleVerifyCode} className="space-y-6">
               
+              {errorMessage && (
+                <div className="bg-red-50 p-4 rounded-xl border border-red-200 text-xs text-red-950 flex items-start gap-3 animate-in fade-in duration-200">
+                  <AlertCircle className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <span className="font-extrabold text-xs block text-red-950">تنبيه بالنظام</span>
+                    <p className="leading-relaxed text-[11.5px]">{errorMessage}</p>
+                  </div>
+                </div>
+              )}
+
               {smtpStatus?.success ? (
                 <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-200 flex items-start gap-3">
                   <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse mt-1.5 shrink-0" />
@@ -398,6 +680,16 @@ export default function AuthScreen({
             
             /* 2. Login or Register Form */
             <form onSubmit={handleAuthSubmit} className="space-y-5">
+              
+              {errorMessage && (
+                <div className="bg-red-50 p-4 rounded-xl border border-red-200 text-xs text-red-950 flex items-start gap-3 animate-in fade-in duration-200">
+                  <AlertCircle className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <span className="font-extrabold text-xs block text-red-950">تنبيه بالنظام</span>
+                    <p className="leading-relaxed text-[11.5px]">{errorMessage}</p>
+                  </div>
+                </div>
+              )}
               
               {/* Role Selection when Registering */}
               {isRegistering && (

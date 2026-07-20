@@ -103,7 +103,11 @@ export async function seedDatabaseIfEmpty() {
     await setDoc(doc(db, 'virtual_emails', initialEmail.id), initialEmail);
 
     console.log('Database seeding completed successfully!');
-  } catch (error) {
-    console.error('Error seeding database:', error);
+  } catch (error: any) {
+    if (error?.message?.includes('offline') || error?.message?.includes('unreachable') || error?.message?.includes('network')) {
+      console.warn('Database seeding deferred (client is offline or network is unreachable).');
+    } else {
+      console.warn('Database seeding status:', error?.message || error);
+    }
   }
 }

@@ -14,7 +14,7 @@ async function startServer() {
 
   // API Route for sending real emails via Gmail SMTP
   app.post("/api/send-email", async (req, res) => {
-    const { toEmail, subject, body } = req.body;
+    const { toEmail, subject, body, html } = req.body;
 
     const gmailUser = process.env.GMAIL_USER;
     const gmailPass = process.env.GMAIL_APP_PASSWORD;
@@ -41,7 +41,8 @@ async function startServer() {
         from: `"منصة ساس اللوجستية" <${gmailUser}>`,
         to: toEmail,
         subject: subject,
-        text: body
+        text: body,
+        html: html || undefined
       };
 
       const info = await transporter.sendMail(mailOptions);

@@ -31,7 +31,7 @@ import {
   doc, 
   setDoc, 
   addDoc, 
-  getDoc, 
+  safeGetDoc, 
   updateDoc, 
   deleteDoc, 
   onSnapshot, 
@@ -67,6 +67,8 @@ export default function App() {
       const uList: User[] = [];
       snap.forEach(d => uList.push(d.data() as User));
       setUsers(uList);
+    }, (err) => {
+      console.warn("Users subscription offline or restricted:", err.message);
     });
 
     const unsubDrivers = onSnapshot(collection(db, 'drivers'), (snap) => {
@@ -79,6 +81,8 @@ export default function App() {
         group[driver.carrierId].push(driver);
       });
       setDrivers(group);
+    }, (err) => {
+      console.warn("Drivers subscription offline or restricted:", err.message);
     });
 
     const unsubTrucks = onSnapshot(collection(db, 'trucks'), (snap) => {
@@ -91,18 +95,24 @@ export default function App() {
         group[truck.carrierId].push(truck);
       });
       setTrucks(group);
+    }, (err) => {
+      console.warn("Trucks subscription offline or restricted:", err.message);
     });
 
     const unsubProducts = onSnapshot(collection(db, 'products'), (snap) => {
       const list: Product[] = [];
       snap.forEach(d => list.push(d.data() as Product));
       setProducts(list);
+    }, (err) => {
+      console.warn("Products subscription offline or restricted:", err.message);
     });
 
     const unsubClients = onSnapshot(collection(db, 'clients'), (snap) => {
       const list: ShipperClient[] = [];
       snap.forEach(d => list.push(d.data() as ShipperClient));
       setClients(list);
+    }, (err) => {
+      console.warn("Clients subscription offline or restricted:", err.message);
     });
 
     const unsubShipments = onSnapshot(collection(db, 'shipments'), (snap) => {
@@ -110,18 +120,24 @@ export default function App() {
       snap.forEach(d => list.push(d.data() as ShipmentRequest));
       list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       setShipments(list);
+    }, (err) => {
+      console.warn("Shipments subscription offline or restricted:", err.message);
     });
 
     const unsubWaybills = onSnapshot(collection(db, 'waybills'), (snap) => {
       const list: Waybill[] = [];
       snap.forEach(d => list.push(d.data() as Waybill));
       setWaybills(list);
+    }, (err) => {
+      console.warn("Waybills subscription offline or restricted:", err.message);
     });
 
     const unsubSettings = onSnapshot(doc(db, 'settings', 'global'), (docSnap) => {
       if (docSnap.exists()) {
         setSystemSettings(docSnap.data() as SystemSettings);
       }
+    }, (err) => {
+      console.warn("Settings subscription offline or restricted:", err.message);
     });
 
     const unsubNotifs = onSnapshot(collection(db, 'notifications'), (snap) => {
@@ -129,6 +145,8 @@ export default function App() {
       snap.forEach(d => list.push(d.data() as Notification));
       list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       setNotifications(list);
+    }, (err) => {
+      console.warn("Notifications subscription offline or restricted:", err.message);
     });
 
     return () => {
@@ -144,19 +162,45 @@ export default function App() {
     };
   }, []);
 
-  // 2. Firebase Authentication State Listener
+  // 2. Firebase & Virtual Authentication State Listener
   useEffect(() => {
+    // Check if there is a virtual user session
+    const virtualUserStr = localStorage.getItem('sas_virtual_user');
+    if (virtualUserStr) {
+      try {
+        const vUser = JSON.parse(virtualUserStr) as User;
+        setCurrentUser(vUser);
+        return; // Skip Firebase listener if virtual session is present
+      } catch (e) {
+        localStorage.removeItem('sas_virtual_user');
+      }
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
-        const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
-        if (userDoc.exists()) {
-          setCurrentUser(userDoc.data() as User);
-        } else {
-          // Fallback if profile document is still writing
+        try {
+          const userDoc = await safeGetDoc(doc(db, 'users', fbUser.uid));
+          if (userDoc && userDoc.exists()) {
+            setCurrentUser(userDoc.data() as User);
+          } else {
+            // Fallback if profile document is still writing
+            setCurrentUser({
+              id: fbUser.uid,
+              email: fbUser.email || '',
+              name: fbUser.email?.split('@')[0] || 'مستخدم ساس',
+              phone: '0500000000',
+              role: fbUser.email?.includes('admin') ? UserRole.ADMIN : (fbUser.email?.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER),
+              isVerified: true,
+              createdAt: new Date().toISOString()
+            });
+          }
+        } catch (err: any) {
+          console.error("Error fetching user profile (offline/network error):", err);
+          // Fallback if offline or network connection is lost
           setCurrentUser({
             id: fbUser.uid,
             email: fbUser.email || '',
-            name: fbUser.email?.split('@')[0] || 'مستخدم ساس',
+            name: fbUser.email?.split('@')[0] || 'مستخدم ساس (أوفلاين)',
             phone: '0500000000',
             role: fbUser.email?.includes('admin') ? UserRole.ADMIN : (fbUser.email?.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER),
             isVerified: true,
@@ -174,23 +218,45 @@ export default function App() {
 
   const handleLoginSuccess = async (user: User) => {
     setCurrentUser(user);
-    await addNotification(user.id, 'تم تسجيل الدخول', `أهلاً بك مجدداً في منصة ساس اللوجستية.`);
+    // Trigger notification in the background so it doesn't block UI transition
+    addNotification(user.id, 'تم تسجيل الدخول', `أهلاً بك مجدداً في منصة ساس اللوجستية.`)
+      .catch(err => console.warn("Failed to add login notification:", err));
   };
 
   const handleRegisterSuccess = async (registeredUser: Omit<User, 'id' | 'createdAt'>) => {
-    // Handled directly inside AuthScreen via Firebase Auth & doc creation, 
-    // but we can set the active user state as a safeguard.
-    const fbUser = auth.currentUser;
-    if (fbUser) {
-      const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
-      if (userDoc.exists()) {
-        setCurrentUser(userDoc.data() as User);
+    // If virtual mode is enabled, the virtual user is already set, otherwise get the Firebase auth user
+    if (localStorage.getItem('sas_virtual_auth_mode') === 'true') {
+      const virtualUserStr = localStorage.getItem('sas_virtual_user');
+      if (virtualUserStr) {
+        setCurrentUser(JSON.parse(virtualUserStr) as User);
+      }
+    } else {
+      const fbUser = auth.currentUser;
+      if (fbUser) {
+        try {
+          const userDoc = await safeGetDoc(doc(db, 'users', fbUser.uid));
+          if (userDoc && userDoc.exists()) {
+            setCurrentUser(userDoc.data() as User);
+          }
+        } catch (err) {
+          console.error("Error fetching registered profile (offline/network error):", err);
+          setCurrentUser({
+            id: fbUser.uid,
+            ...registeredUser,
+            createdAt: new Date().toISOString()
+          } as User);
+        }
       }
     }
   };
 
   const handleLogout = async () => {
-    await signOut(auth);
+    localStorage.removeItem('sas_virtual_user');
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.warn("Sign out failed or already signed out:", err);
+    }
     setCurrentUser(null);
   };
 
@@ -198,6 +264,9 @@ export default function App() {
     // Switch simulation by finding the user profile and saving it
     const user = users.find(u => u.id === userId);
     if (user) {
+      if (localStorage.getItem('sas_virtual_auth_mode') === 'true') {
+        localStorage.setItem('sas_virtual_user', JSON.stringify(user));
+      }
       setCurrentUser(user);
       await addNotification(user.id, 'تبديل دور العمل', `تم تبديل دورك الحالي بالمنصة إلى: ${user.name}`);
     }
@@ -215,26 +284,42 @@ export default function App() {
       isRead: false
     };
     
-    // Save to Firestore notifications
-    await setDoc(doc(db, 'notifications', notifId), newNotif);
+    try {
+      // Save to Firestore notifications
+      await setDoc(doc(db, 'notifications', notifId), newNotif);
 
-    // Write a Virtual Email corresponding to this notification
-    const userSnap = await getDoc(doc(db, 'users', userId));
-    if (userSnap.exists()) {
-      const profile = userSnap.data() as User;
-      await addDoc(collection(db, 'virtual_emails'), {
-        toEmail: profile.email,
-        subject: `تنبيه من منصة ساس: ${title}`,
-        body: `عزيزي شريك ساس (${profile.name})،
+      // Write a Virtual Email corresponding to this notification
+      let profile: User | null = null;
+      if (currentUser && currentUser.id === userId) {
+        profile = currentUser;
+      } else {
+        try {
+          const userSnap = await safeGetDoc(doc(db, 'users', userId), 1500); // 1.5 second timeout
+          if (userSnap && userSnap.exists()) {
+            profile = userSnap.data() as User;
+          }
+        } catch (getErr) {
+          console.warn("Could not fetch user profile for notification:", getErr);
+        }
+      }
+
+      if (profile) {
+        await addDoc(collection(db, 'virtual_emails'), {
+          toEmail: profile.email,
+          subject: `تنبيه من منصة ساس: ${title}`,
+          body: `عزيزي شريك ساس (${profile.name})،
 
 وصلك تنبيه جديد في حسابك:
 "${message}"
 
 يرجى مراجعة لوحة التحكم للتفاعل مع الطلب ومتابعة دورة النقل البري.`,
-        createdAt: new Date().toISOString(),
-        isRead: false,
-        type: 'notification_alert'
-      });
+          createdAt: new Date().toISOString(),
+          isRead: false,
+          type: 'notification_alert'
+        });
+      }
+    } catch (err) {
+      console.warn("Could not save notification to Firestore (offline):", err);
     }
   };
 
@@ -546,6 +631,7 @@ export default function App() {
         onSwitchUser={handleSwitchUser}
         onMarkNotificationRead={handleMarkNotificationRead}
         onClearNotifications={handleClearNotifications}
+        onLogout={handleLogout}
       />
 
       {/* 2. Main Content Board */}

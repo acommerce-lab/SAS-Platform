@@ -9,7 +9,8 @@ import {
   Check, 
   Sparkles,
   Inbox,
-  Clock
+  Clock,
+  LogOut
 } from 'lucide-react';
 import { UserRole, User, Notification } from '../types';
 
@@ -20,6 +21,7 @@ interface NavbarProps {
   onSwitchUser: (userId: string) => void;
   onMarkNotificationRead: (id: string) => void;
   onClearNotifications: () => void;
+  onLogout: () => void;
 }
 
 export default function Navbar({
@@ -29,6 +31,7 @@ export default function Navbar({
   onSwitchUser,
   onMarkNotificationRead,
   onClearNotifications,
+  onLogout,
 }: NavbarProps) {
   const [showRoleSelector, setShowRoleSelector] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -234,6 +237,18 @@ export default function Navbar({
               <div className="hidden md:flex">
                 {getRoleBadge(currentUser.role)}
               </div>
+            )}
+
+            {/* Logout Button */}
+            {currentUser && (
+              <button
+                onClick={onLogout}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-rose-700 hover:text-rose-800 hover:bg-rose-50 bg-slate-50 border border-slate-200/80 hover:border-rose-100 rounded-lg transition-all cursor-pointer"
+                title="تسجيل الخروج من المنصة"
+              >
+                <LogOut className="w-4 h-4 text-rose-600" />
+                <span className="hidden sm:inline">تسجيل الخروج</span>
+              </button>
             )}
 
           </div>
