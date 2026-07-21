@@ -162,54 +162,42 @@ export default function App() {
     };
   }, []);
 
-  // 2. Firebase & Virtual Authentication State Listener
+  // 2. Firebase Authentication State Listener
   useEffect(() => {
-    // Check if we are in Virtual Auth Mode first
-    const isVirtualMode = localStorage.getItem('sas_virtual_auth_mode') === 'true';
-    if (isVirtualMode) {
-      const virtualUserStr = localStorage.getItem('sas_virtual_user');
-      if (virtualUserStr) {
-        try {
-          const vUser = JSON.parse(virtualUserStr) as User;
-          setCurrentUser(vUser);
-          return; // Skip Firebase listener for virtual simulation
-        } catch (e) {
-          localStorage.removeItem('sas_virtual_user');
-        }
-      }
-    }
-
-    // Always prefer live Firebase Auth as the main session source of truth
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
-        // Clear any stale virtual user to prevent data mismatch on reload
-        localStorage.removeItem('sas_virtual_user');
-        
         try {
-          const userDoc = await safeGetDoc(doc(db, 'users', fbUser.uid));
+          let userDoc = await safeGetDoc(doc(db, 'users', fbUser.uid));
           if (userDoc && userDoc.exists()) {
             setCurrentUser(userDoc.data() as User);
           } else {
-            // Fallback if profile document is still writing
-            setCurrentUser({
+            const resolvedRole = fbUser.email?.includes('admin') ? UserRole.ADMIN : (fbUser.email?.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER);
+
+            const newUserProfile: User = {
               id: fbUser.uid,
               email: fbUser.email || '',
               name: fbUser.email?.split('@')[0] || 'مستخدم ساس',
               phone: '0500000000',
-              role: fbUser.email?.includes('admin') ? UserRole.ADMIN : (fbUser.email?.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER),
+              role: resolvedRole,
               isVerified: true,
               createdAt: new Date().toISOString()
-            });
+            };
+
+            setCurrentUser(newUserProfile);
+            
+            // Persist document to Firestore immediately
+            setDoc(doc(db, 'users', fbUser.uid), newUserProfile).catch(err => console.warn("Auto-saving user profile error:", err));
           }
         } catch (err: any) {
-          console.error("Error fetching user profile (offline/network error):", err);
-          // Fallback if offline or network connection is lost
+          console.error("Error fetching user profile:", err);
+          const resolvedRole = fbUser.email?.includes('admin') ? UserRole.ADMIN : (fbUser.email?.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER);
+
           setCurrentUser({
             id: fbUser.uid,
             email: fbUser.email || '',
-            name: fbUser.email?.split('@')[0] || 'مستخدم ساس (أوفلاين)',
+            name: fbUser.email?.split('@')[0] || 'مستخدم ساس',
             phone: '0500000000',
-            role: fbUser.email?.includes('admin') ? UserRole.ADMIN : (fbUser.email?.includes('carrier') ? UserRole.CARRIER : UserRole.SHIPPER),
+            role: resolvedRole,
             isVerified: true,
             createdAt: new Date().toISOString()
           });
@@ -225,40 +213,28 @@ export default function App() {
 
   const handleLoginSuccess = async (user: User) => {
     setCurrentUser(user);
-    // Trigger notification in the background so it doesn't block UI transition
     addNotification(user.id, 'تم تسجيل الدخول', `أهلاً بك مجدداً في منصة ساس اللوجستية.`)
       .catch(err => console.warn("Failed to add login notification:", err));
   };
 
   const handleRegisterSuccess = async (registeredUser: Omit<User, 'id' | 'createdAt'>) => {
-    // If virtual mode is enabled, the virtual user is already set, otherwise get the Firebase auth user
-    if (localStorage.getItem('sas_virtual_auth_mode') === 'true') {
-      const virtualUserStr = localStorage.getItem('sas_virtual_user');
-      if (virtualUserStr) {
-        setCurrentUser(JSON.parse(virtualUserStr) as User);
-      }
-    } else {
-      const fbUser = auth.currentUser;
-      if (fbUser) {
-        try {
-          const userDoc = await safeGetDoc(doc(db, 'users', fbUser.uid));
-          if (userDoc && userDoc.exists()) {
-            setCurrentUser(userDoc.data() as User);
-          }
-        } catch (err) {
-          console.error("Error fetching registered profile (offline/network error):", err);
-          setCurrentUser({
-            id: fbUser.uid,
-            ...registeredUser,
-            createdAt: new Date().toISOString()
-          } as User);
-        }
+    const fbUser = auth.currentUser;
+    if (fbUser) {
+      const fullUser: User = {
+        id: fbUser.uid,
+        ...registeredUser,
+        createdAt: new Date().toISOString()
+      };
+      setCurrentUser(fullUser);
+      try {
+        await setDoc(doc(db, 'users', fbUser.uid), fullUser);
+      } catch (err) {
+        console.warn("Could not save user profile doc:", err);
       }
     }
   };
 
   const handleLogout = async () => {
-    localStorage.removeItem('sas_virtual_user');
     try {
       await signOut(auth);
     } catch (err) {
@@ -268,14 +244,10 @@ export default function App() {
   };
 
   const handleSwitchUser = async (userId: string) => {
-    // Switch simulation by finding the user profile and saving it
     const user = users.find(u => u.id === userId);
     if (user) {
-      if (localStorage.getItem('sas_virtual_auth_mode') === 'true') {
-        localStorage.setItem('sas_virtual_user', JSON.stringify(user));
-      }
       setCurrentUser(user);
-      await addNotification(user.id, 'تبديل دور العمل', `تم تبديل دورك الحالي بالمنصة إلى: ${user.name}`);
+      await addNotification(user.id, 'تبديل حساب', `أهلاً بك: ${user.name}`);
     }
   };
 
@@ -301,7 +273,7 @@ export default function App() {
         profile = currentUser;
       } else {
         try {
-          const userSnap = await safeGetDoc(doc(db, 'users', userId), 1500); // 1.5 second timeout
+          const userSnap = await safeGetDoc(doc(db, 'users', userId));
           if (userSnap && userSnap.exists()) {
             profile = userSnap.data() as User;
           }
@@ -349,31 +321,42 @@ export default function App() {
     newDriver: Omit<Driver, 'id'>, 
     newTruck: Omit<Truck, 'id' | 'driverId'>
   ) => {
-    if (!currentUser) return;
+    const activeCarrierId = auth.currentUser?.uid || currentUser?.id;
+    if (!activeCarrierId) return;
 
     const driverId = 'drv-' + Date.now();
     const truckId = 'trk-' + Date.now();
 
-    const createdDriver = {
+    const createdDriver: Driver = {
       ...newDriver,
       id: driverId,
-      carrierId: currentUser.id
+      carrierId: activeCarrierId
     };
 
-    const createdTruck = {
+    const createdTruck: Truck = {
       ...newTruck,
       id: truckId,
       driverId: driverId,
-      carrierId: currentUser.id
+      carrierId: activeCarrierId
     };
 
-    // Save to Firestore
+    // Optimistic local update so UI updates immediately
+    setDrivers(prev => ({
+      ...prev,
+      [activeCarrierId]: [...(prev[activeCarrierId] || []), createdDriver]
+    }));
+    setTrucks(prev => ({
+      ...prev,
+      [activeCarrierId]: [...(prev[activeCarrierId] || []), createdTruck]
+    }));
+
+    // Save to Firestore permanently
     await setDoc(doc(db, 'drivers', driverId), createdDriver);
     await setDoc(doc(db, 'trucks', truckId), createdTruck);
 
     // Notify carrier
     await addNotification(
-      currentUser.id, 
+      activeCarrierId, 
       'ربط السائق بالشاحنة ناجح', 
       `تم تسجيل السائق (${createdDriver.name}) وتفويضه على الشاحنة رقم لوحة (${createdTruck.plateNumber}) بنجاح.`
     );
@@ -384,12 +367,13 @@ export default function App() {
       await addNotification(
         adminUser.id,
         'أسطول ناقل جديد مسجل',
-        `قام الناقل (${currentUser.name}) بإضافة شاحنة وسائق بنظام (لا شاحنة بلا سائق).`
+        `قام الناقل (${currentUser?.name || 'ناقل بري'}) بإضافة شاحنة وسائق بنظام (لا شاحنة بلا سائق).`
       );
     }
   };
 
   const handleUpdateShipmentStatus = async (shipmentId: string, status: ShipmentStatus) => {
+    setShipments(prev => prev.map(s => s.id === shipmentId ? { ...s, status } : s));
     await updateDoc(doc(db, 'shipments', shipmentId), { status });
     
     // Find shipment to trigger targeted notifications
@@ -418,7 +402,6 @@ export default function App() {
 
   // Shipper actions
   const handleAddProduct = async (newProduct: Omit<Product, 'id' | 'shipperId'>) => {
-    // Dynamically retrieve current shipper's ID from active login token (Auth session) or currentUser
     const activeShipperId = auth.currentUser?.uid || currentUser?.id;
     if (!activeShipperId) return;
 
@@ -428,12 +411,12 @@ export default function App() {
       shipperId: activeShipperId
     };
     
+    setProducts(prev => [...prev.filter(p => p.id !== created.id), created]);
     await setDoc(doc(db, 'products', created.id), created);
     await addNotification(activeShipperId, 'تمت إضافة منتج جديد', `تم تسجيل منتجك (${created.name}) بنجاح في قاعدة البيانات.`);
   };
 
   const handleAddClient = async (newClient: Omit<ShipperClient, 'id' | 'shipperId'>) => {
-    // Dynamically retrieve current shipper's ID from active login token (Auth session) or currentUser
     const activeShipperId = auth.currentUser?.uid || currentUser?.id;
     if (!activeShipperId) return;
 
@@ -443,6 +426,7 @@ export default function App() {
       shipperId: activeShipperId
     };
     
+    setClients(prev => [...prev.filter(c => c.id !== created.id), created]);
     await setDoc(doc(db, 'clients', created.id), created);
     await addNotification(activeShipperId, 'تمت إضافة مستلم جديد', `تم حفظ بيانات العميل المستمر (${created.name}) بنجاح.`);
   };
@@ -450,24 +434,31 @@ export default function App() {
   const handleAddShipmentRequest = async (
     newRequest: Omit<ShipmentRequest, 'id' | 'shipperId' | 'shipperName' | 'createdAt' | 'status'>
   ) => {
-    // Dynamically retrieve current shipper's ID from active login token (Auth session) or currentUser
     const activeShipperId = auth.currentUser?.uid || currentUser?.id;
     if (!activeShipperId) return;
 
+    const reqId = 'req-' + Date.now();
     const created: ShipmentRequest = {
       ...newRequest,
-      id: 'req-' + Date.now().toString().slice(-4),
+      id: reqId,
       shipperId: activeShipperId,
       shipperName: currentUser?.name || 'شاحن معتمد',
       createdAt: new Date().toISOString(),
       status: ShipmentStatus.PENDING_ASSIGNMENT,
     };
 
-    await setDoc(doc(db, 'shipments', created.id), created);
+    // Optimistically update React state immediately for all views
+    setShipments(prev => [created, ...prev.filter(s => s.id !== reqId)]);
+
+    try {
+      await setDoc(doc(db, 'shipments', created.id), created);
+    } catch (err) {
+      console.warn("Could not write shipment request to Firestore:", err);
+    }
 
     // Notify Shipper
     await addNotification(
-      currentUser.id,
+      activeShipperId,
       'تم إرسال طلب الشحن لشركة ساس',
       `تم إرسال الطلب برقم مرجعي #${created.id}. بانتظار تقدير المسافة والوسطاء للتسعير.`
     );
@@ -478,7 +469,7 @@ export default function App() {
       await addNotification(
         adminUser.id,
         'طلب شحن معلق جديد',
-        `قدم الشاحن (${currentUser.name}) طلب شحن لمنتج (${created.productName}) بوزن/كمية (${created.quantity}).`
+        `قدم الشاحن (${currentUser?.name || 'شاحن معتمد'}) طلب شحن لمنتج (${created.productName}) بوزن/كمية (${created.quantity}).`
       );
     }
   };
@@ -529,6 +520,10 @@ export default function App() {
       termsAndConditions: systemSettings.defaultTerms,
     };
 
+    // Optimistically update local waybills and shipments
+    setWaybills(prev => [newWaybill, ...prev.filter(w => w.id !== newWaybill.id)]);
+    setShipments(prev => prev.map(sh => sh.id === shipmentId ? { ...sh, status: ShipmentStatus.APPROVED } : sh));
+
     // Save to Firestore
     await setDoc(doc(db, 'waybills', newWaybill.id), newWaybill);
     await updateDoc(doc(db, 'shipments', shipmentId), { status: ShipmentStatus.APPROVED });
@@ -576,6 +571,7 @@ export default function App() {
   };
 
   const handleRejectShipmentAssignment = async (shipmentId: string) => {
+    setShipments(prev => prev.map(sh => sh.id === shipmentId ? { ...sh, status: ShipmentStatus.REJECTED } : sh));
     await updateDoc(doc(db, 'shipments', shipmentId), { status: ShipmentStatus.REJECTED });
     
     // Notify Admin
@@ -609,6 +605,7 @@ export default function App() {
       status: ShipmentStatus.PENDING_APPROVAL,
     };
 
+    setShipments(prev => prev.map(sh => sh.id === shipmentId ? { ...sh, ...updated } : sh));
     await updateDoc(doc(db, 'shipments', shipmentId), updated);
 
     // Notify Shipper

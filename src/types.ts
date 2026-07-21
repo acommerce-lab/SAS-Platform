@@ -29,6 +29,7 @@ export interface User {
 
 export interface Driver {
   id: string;
+  carrierId?: string;
   name: string;
   licenseNumber: string;
   phone: string;
@@ -36,6 +37,7 @@ export interface Driver {
 
 export interface Truck {
   id: string;
+  carrierId?: string;
   plateNumber: string;
   type: string; // تبريد، سطحة، قفص، لور، الخ
   category: string; // دينة، قاطرة، تريلة، الخ

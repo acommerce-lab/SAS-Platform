@@ -55,7 +55,7 @@ export default function AdminPanel({
   onUpdateSystemSettings,
   onAssignCarrier,
 }: AdminPanelProps) {
-  const [activeTab, setActiveTab] = useState<'requests' | 'all-shipments' | 'settings'>('requests');
+  const [activeTab, setActiveTab] = useState<'requests' | 'all-shipments' | 'fleets' | 'settings'>('requests');
   const [selectedShipment, setSelectedShipment] = useState<ShipmentRequest | null>(null);
   
   // Estimation modal/calculator states
@@ -79,56 +79,25 @@ export default function AdminPanel({
     return shipments.filter(s => s.status === ShipmentStatus.PENDING_ASSIGNMENT);
   }, [shipments]);
 
-  // Google Maps Distance Calculator with mathematical Haversine backup
-  const handleSimulateGoogleMaps = () => {
+  // OpenStreetMap / Haversine Road Distance Calculator
+  const handleCalculateDistance = () => {
     if (!selectedShipment) return;
     setCalculatingDistance(true);
 
     const { loadingLat, loadingLng, deliveryLat, deliveryLng } = selectedShipment;
 
-    // 1. If we have coordinates, check if standard Google Maps SDK is loaded
+    // 1. If we have coordinates, calculate distance using Haversine with road curvature factor
     if (loadingLat && loadingLng && deliveryLat && deliveryLng) {
-      // @ts-ignore
-      if (window.google && window.google.maps && !(window as any).hasGoogleMapsAuthError) {
-        try {
-          // @ts-ignore
-          const service = new window.google.maps.DistanceMatrixService();
-          service.getDistanceMatrix({
-            origins: [{ lat: loadingLat, lng: loadingLng }],
-            destinations: [{ lat: deliveryLat, lng: deliveryLng }],
-            // @ts-ignore
-            travelMode: window.google.maps.TravelMode.DRIVING,
-          }, (response: any, status: any) => {
-            if (status === 'OK' && response?.rows?.[0]?.elements?.[0]?.distance) {
-              const meters = response.rows[0].elements[0].distance.value;
-              const km = Number((meters / 1000).toFixed(1));
-              setDistanceInput(km);
-              setCalculatingDistance(false);
-              setSelectedCarrierRow(null);
-            } else {
-              // Fallback to Haversine if Google Distance service returns error or not permitted
-              calculateHaversine(loadingLat, loadingLng, deliveryLat, deliveryLng);
-            }
-          });
-          return;
-        } catch (err) {
-          console.warn("Distance matrix service error:", err);
-          calculateHaversine(loadingLat, loadingLng, deliveryLat, deliveryLng);
-          return;
-        }
-      } else {
-        // Calculate mathematically with Haversine immediately
-        calculateHaversine(loadingLat, loadingLng, deliveryLat, deliveryLng);
-        return;
-      }
+      calculateHaversine(loadingLat, loadingLng, deliveryLat, deliveryLng);
+      return;
     }
 
-    // 2. Fallback to smart textual estimation if coordinates are not available
+    // 2. Fallback to route estimation based on city/locations if coordinates are missing
     setTimeout(() => {
       let simulatedDist = 250; // default fallback
       const address = (selectedShipment.loadingLocation + " " + selectedShipment.productName).toLowerCase();
       
-      // Smart estimates based on standard routes inside Saudi Arabia
+      // Route estimates inside Saudi Arabia
       if (address.includes('جدة') || address.includes('الصفا')) {
         simulatedDist = 950;
       } else if (address.includes('الدمام') || address.includes('الشرقية') || address.includes('جبيل')) {
@@ -144,7 +113,7 @@ export default function AdminPanel({
       setDistanceInput(simulatedDist);
       setCalculatingDistance(false);
       setSelectedCarrierRow(null); // Reset choice to force recalculating
-    }, 800);
+    }, 400);
   };
 
   const calculateHaversine = (lat1: number, lon1: number, lat2: number, lon2: number) => {
@@ -188,7 +157,10 @@ export default function AdminPanel({
         t.category === selectedShipment.truckCategory
       );
 
-      compatibleTrucks.forEach(truck => {
+      // Fallback: If no exact type/category match, include carrier's registered trucks so admin can assign
+      const trucksToConsider = compatibleTrucks.length > 0 ? compatibleTrucks : carrierTrucks;
+
+      trucksToConsider.forEach(truck => {
         const driver = carrierDrivers.find(d => d.id === truck.driverId);
         
         // Calculate cost: First Km rate + (Distance - 1) * General Km rate
@@ -289,6 +261,19 @@ export default function AdminPanel({
           <span className="flex items-center gap-2">
             <Activity className="w-4 h-4" />
             سجل العمليات والطلبات العام ({shipments.length})
+          </span>
+        </button>
+        <button
+          onClick={() => setActiveTab('fleets')}
+          className={`px-5 py-3 text-sm font-bold border-b-2 -mb-px transition-all cursor-pointer ${
+            activeTab === 'fleets' 
+              ? 'border-slate-950 text-slate-950' 
+              : 'border-transparent text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <span className="flex items-center gap-2">
+            <Truck className="w-4 h-4" />
+            أساطيل الناقلين والسائقين ({carriers.length})
           </span>
         </button>
         <button
@@ -448,7 +433,91 @@ export default function AdminPanel({
         </div>
       )}
 
-      {/* 3. Settings Tab */}
+      {/* 3. Fleets & Carriers Overview Tab */}
+      {activeTab === 'fleets' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200/80 shadow-xs overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 className="font-extrabold text-slate-900 text-sm">أساطيل الناقلين والشاحنات المعتمدة في النظام</h3>
+                <p className="text-xs text-slate-400 mt-0.5">سجل شامل بالشركات والمؤسسات البرية المسجلة، شاحناتها، وسائقيها المعتمدين</p>
+              </div>
+              <span className="px-3 py-1 bg-amber-50 text-amber-900 border border-amber-200 text-xs font-bold rounded-lg">
+                إجمالي الناقلين: {carriers.length}
+              </span>
+            </div>
+
+            {carriers.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <Truck className="w-12 h-12 mx-auto text-slate-300 mb-2" />
+                <span className="text-sm block">لا يوجد ناقلون مسجلون حالياً</span>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {carriers.map((carrier) => {
+                  const carrierTrucks = allTrucks[carrier.id] || [];
+                  const carrierDrivers = allDrivers[carrier.id] || [];
+
+                  return (
+                    <div key={carrier.id} className="p-6 space-y-4 hover:bg-slate-50/50 transition-colors">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                        <div>
+                          <span className="font-black text-slate-900 text-base block">{carrier.name}</span>
+                          <span className="text-xs text-slate-400 font-mono block">{carrier.email} | هاتف: {carrier.phone}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="px-2.5 py-1 bg-blue-50 text-blue-900 border border-blue-200 text-xs font-bold rounded-md">
+                            عدد الشاحنات: {carrierTrucks.length}
+                          </span>
+                          <span className="px-2.5 py-1 bg-emerald-50 text-emerald-900 border border-emerald-200 text-xs font-bold rounded-md">
+                            السائقون المفوضون: {carrierDrivers.length}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Trucks & Drivers grid for this carrier */}
+                      {carrierTrucks.length === 0 ? (
+                        <div className="text-xs text-slate-400 italic py-2">
+                          لم يقم الناقل بتسجيل شاحنات حتى الآن.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pt-1">
+                          {carrierTrucks.map((truck) => {
+                            const driver = carrierDrivers.find(d => d.id === truck.driverId);
+                            return (
+                              <div key={truck.id} className="bg-slate-50 p-3.5 rounded-lg border border-slate-200 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-extrabold text-xs text-slate-900">{truck.plateNumber}</span>
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-white text-slate-700 border border-slate-200">
+                                    {truck.category} - {truck.type}
+                                  </span>
+                                </div>
+
+                                <div className="text-[11px] text-slate-600 space-y-1 pt-1 border-t border-slate-200/60">
+                                  <div>
+                                    <span className="text-slate-400 font-bold block">السائق المفوض:</span>
+                                    <span className="font-bold text-slate-800">{driver ? driver.name : 'غير محدد'} ({driver ? driver.phone : '-'})</span>
+                                  </div>
+                                  <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
+                                    <span>تسعيرة أول كم: {truck.firstKmRate} ريال</span>
+                                    <span>كيلو إضافي: {truck.generalKmRate} ريال</span>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 4. Settings Tab */}
       {activeTab === 'settings' && (
         <div className="bg-white p-6 rounded-xl border border-slate-200/80 shadow-xs">
           <div className="border-b border-slate-100 pb-4 mb-6">
@@ -539,16 +608,16 @@ export default function AdminPanel({
                   </div>
                 </div>
 
-                {/* Google Maps Distance simulation box */}
+                {/* Distance calculation box */}
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-700">المسافة بخرائط جوجل</span>
+                    <span className="text-xs font-bold text-slate-700">المسافة المحسوبة عبر الخريطة</span>
                     <button
                       type="button"
-                      onClick={handleSimulateGoogleMaps}
+                      onClick={handleCalculateDistance}
                       className="text-[11px] font-bold text-amber-800 hover:underline cursor-pointer"
                     >
-                      استعلام مباشر
+                      حساب دقيق للمسافة
                     </button>
                   </div>
                   

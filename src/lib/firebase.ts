@@ -46,7 +46,8 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+const dbId = metaEnv.VITE_FIREBASE_DATABASE_ID || (config ? config.firestoreDatabaseId : '');
+export const db = dbId ? getFirestore(app, dbId) : getFirestore(app);
 
 // Enable offline persistence
 try {
@@ -64,39 +65,20 @@ try {
 }
 
 /**
- * A safe wrapper for getDoc that prevents hanging if the client is offline
- * or if there are connection/gRPC issues. It tries to load from cache first
- * and then tries the server with a 2-second timeout.
+ * A wrapper for getDoc that attempts to fetch from Firestore, falling back to cache if offline.
  */
-export async function safeGetDoc(docRef: any, timeoutMs: number = 2000): Promise<any> {
-  // 1. Try Cache First (instant response if available)
+export async function safeGetDoc(docRef: any): Promise<any> {
   try {
-    const cacheSnap = await getDocFromCache(docRef);
-    if (cacheSnap.exists()) {
-      console.log(`[safeGetDoc] Found document ${docRef.id} in offline cache.`);
-      return cacheSnap;
+    return await getDoc(docRef);
+  } catch (err) {
+    try {
+      const cacheSnap = await getDocFromCache(docRef);
+      if (cacheSnap.exists()) {
+        return cacheSnap;
+      }
+    } catch (cacheErr) {
+      // Ignore cache error
     }
-  } catch (cacheErr) {
-    // Cache miss or persistence not initialized, proceed to server
-  }
-
-  // 2. Race Server Fetch with a Timeout
-  const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error("OFFLINE_TIMEOUT")), timeoutMs)
-  );
-
-  try {
-    const serverSnap = await Promise.race([
-      getDocFromServer(docRef),
-      timeoutPromise
-    ]);
-    return serverSnap;
-  } catch (serverErr: any) {
-    console.warn(`[safeGetDoc] Server fetch failed or timed out for ${docRef.id}, returning a safe offline mock:`, serverErr.message || serverErr);
-    
-    // Instead of calling standard getDoc which can hang indefinitely,
-    // return a safe mock snapshot that signals the document is missing/offline.
-    // This allows the app to proceed instantly with fallback offline profiles.
     return {
       exists: () => false,
       data: () => null,
