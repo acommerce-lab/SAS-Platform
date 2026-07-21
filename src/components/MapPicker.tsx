@@ -47,9 +47,29 @@ export default function MapPicker({
   const [showMockSuggestions, setShowMockSuggestions] = useState(false);
   const [googleSuggestions, setGoogleSuggestions] = useState<any[]>([]);
   const [showGoogleSuggestions, setShowGoogleSuggestions] = useState(false);
+  const [hasAuthError, setHasAuthError] = useState(Boolean(typeof window !== 'undefined' && (window as any).hasGoogleMapsAuthError));
 
   const autocompleteServiceRef = useRef<any>(null);
   const geocoderRef = useRef<any>(null);
+
+  // Catch Maps authentication failure (e.g. ApiTargetBlockedMapError) dynamically
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      if ((window as any).hasGoogleMapsAuthError) {
+        setHasAuthError(true);
+      }
+      
+      const handleAuthFailure = () => {
+        console.warn("[MapPicker] Received google-maps-auth-failure event. Switching to independent interactive mode.");
+        setHasAuthError(true);
+      };
+
+      window.addEventListener('google-maps-auth-failure', handleAuthFailure);
+      return () => {
+        window.removeEventListener('google-maps-auth-failure', handleAuthFailure);
+      };
+    }
+  }, []);
 
   // Sync state with parent value on initialization
   useEffect(() => {
@@ -90,7 +110,7 @@ export default function MapPicker({
       return;
     }
 
-    if (hasValidKey && autocompleteServiceRef.current && window.google) {
+    if (hasValidKey && !hasAuthError && autocompleteServiceRef.current && window.google) {
       // Query Google Places Autocomplete API safely
       try {
         autocompleteServiceRef.current.getPlacePredictions(
@@ -205,10 +225,15 @@ export default function MapPicker({
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <label className="block text-xs font-bold text-slate-700">{label}</label>
-        {hasValidKey ? (
+        {hasValidKey && !hasAuthError ? (
           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
             نظام الخرائط الحية مفعّل
+          </span>
+        ) : hasValidKey && hasAuthError ? (
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+            النمط التفاعلي المستقل (مفتاح محظور/غير نشط)
           </span>
         ) : (
           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
@@ -288,7 +313,7 @@ export default function MapPicker({
       </div>
 
       {/* Actual Google Map Panel */}
-      {hasValidKey ? (
+      {hasValidKey && !hasAuthError ? (
         <div className="relative h-48 w-full rounded-xl overflow-hidden border border-slate-200 shadow-inner bg-slate-100">
           <APIProvider apiKey={MAPS_API_KEY} version="weekly">
             <Map

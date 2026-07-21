@@ -89,7 +89,7 @@ export default function AdminPanel({
     // 1. If we have coordinates, check if standard Google Maps SDK is loaded
     if (loadingLat && loadingLng && deliveryLat && deliveryLng) {
       // @ts-ignore
-      if (window.google && window.google.maps) {
+      if (window.google && window.google.maps && !(window as any).hasGoogleMapsAuthError) {
         try {
           // @ts-ignore
           const service = new window.google.maps.DistanceMatrixService();
