@@ -164,20 +164,27 @@ export default function App() {
 
   // 2. Firebase & Virtual Authentication State Listener
   useEffect(() => {
-    // Check if there is a virtual user session
-    const virtualUserStr = localStorage.getItem('sas_virtual_user');
-    if (virtualUserStr) {
-      try {
-        const vUser = JSON.parse(virtualUserStr) as User;
-        setCurrentUser(vUser);
-        return; // Skip Firebase listener if virtual session is present
-      } catch (e) {
-        localStorage.removeItem('sas_virtual_user');
+    // Check if we are in Virtual Auth Mode first
+    const isVirtualMode = localStorage.getItem('sas_virtual_auth_mode') === 'true';
+    if (isVirtualMode) {
+      const virtualUserStr = localStorage.getItem('sas_virtual_user');
+      if (virtualUserStr) {
+        try {
+          const vUser = JSON.parse(virtualUserStr) as User;
+          setCurrentUser(vUser);
+          return; // Skip Firebase listener for virtual simulation
+        } catch (e) {
+          localStorage.removeItem('sas_virtual_user');
+        }
       }
     }
 
+    // Always prefer live Firebase Auth as the main session source of truth
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
+        // Clear any stale virtual user to prevent data mismatch on reload
+        localStorage.removeItem('sas_virtual_user');
+        
         try {
           const userDoc = await safeGetDoc(doc(db, 'users', fbUser.uid));
           if (userDoc && userDoc.exists()) {
@@ -411,39 +418,47 @@ export default function App() {
 
   // Shipper actions
   const handleAddProduct = async (newProduct: Omit<Product, 'id' | 'shipperId'>) => {
-    if (!currentUser) return;
+    // Dynamically retrieve current shipper's ID from active login token (Auth session) or currentUser
+    const activeShipperId = auth.currentUser?.uid || currentUser?.id;
+    if (!activeShipperId) return;
+
     const created: Product = {
       ...newProduct,
       id: 'prod-' + Date.now(),
-      shipperId: currentUser.id
+      shipperId: activeShipperId
     };
     
     await setDoc(doc(db, 'products', created.id), created);
-    await addNotification(currentUser.id, 'تمت إضافة منتج جديد', `تم تسجيل منتجك (${created.name}) بنجاح في قاعدة البيانات.`);
+    await addNotification(activeShipperId, 'تمت إضافة منتج جديد', `تم تسجيل منتجك (${created.name}) بنجاح في قاعدة البيانات.`);
   };
 
   const handleAddClient = async (newClient: Omit<ShipperClient, 'id' | 'shipperId'>) => {
-    if (!currentUser) return;
+    // Dynamically retrieve current shipper's ID from active login token (Auth session) or currentUser
+    const activeShipperId = auth.currentUser?.uid || currentUser?.id;
+    if (!activeShipperId) return;
+
     const created: ShipperClient = {
       ...newClient,
       id: 'cli-' + Date.now(),
-      shipperId: currentUser.id
+      shipperId: activeShipperId
     };
     
     await setDoc(doc(db, 'clients', created.id), created);
-    await addNotification(currentUser.id, 'تمت إضافة مستلم جديد', `تم حفظ بيانات العميل المستمر (${created.name}) بنجاح.`);
+    await addNotification(activeShipperId, 'تمت إضافة مستلم جديد', `تم حفظ بيانات العميل المستمر (${created.name}) بنجاح.`);
   };
 
   const handleAddShipmentRequest = async (
     newRequest: Omit<ShipmentRequest, 'id' | 'shipperId' | 'shipperName' | 'createdAt' | 'status'>
   ) => {
-    if (!currentUser) return;
+    // Dynamically retrieve current shipper's ID from active login token (Auth session) or currentUser
+    const activeShipperId = auth.currentUser?.uid || currentUser?.id;
+    if (!activeShipperId) return;
 
     const created: ShipmentRequest = {
       ...newRequest,
       id: 'req-' + Date.now().toString().slice(-4),
-      shipperId: currentUser.id,
-      shipperName: currentUser.name,
+      shipperId: activeShipperId,
+      shipperName: currentUser?.name || 'شاحن معتمد',
       createdAt: new Date().toISOString(),
       status: ShipmentStatus.PENDING_ASSIGNMENT,
     };

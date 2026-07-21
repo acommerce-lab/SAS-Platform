@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MapPin, Search, Navigation, Compass } from 'lucide-react';
+import { MapPin } from 'lucide-react';
 import L from 'leaflet';
 
 interface MapPickerProps {
@@ -11,18 +11,6 @@ interface MapPickerProps {
   placeholder?: string;
 }
 
-// Major cities and neighborhoods in Saudi Arabia for high-fidelity fallback suggestions
-const MOCK_SAUDI_PLACES = [
-  { name: 'الرياض - حي الياسمين (مستودعات شمال الرياض)', lat: 24.8156, lng: 46.6389 },
-  { name: 'الخرج - المنطقة الصناعية (مستودعات الشاحن الرئيسية)', lat: 24.1504, lng: 47.3072 },
-  { name: 'جدة - حي الحمراء (منطقة ميناء جدة الإسلامي)', lat: 21.5169, lng: 39.1558 },
-  { name: 'الدمام - المدينة الصناعية الثانية', lat: 26.2415, lng: 49.9865 },
-  { name: 'مكة المكرمة - العزيزية (مركز الشحن الرئيسي)', lat: 21.4111, lng: 39.8661 },
-  { name: 'المدينة المنورة - طريق الهجرة (مجمع لوجستي)', lat: 24.4215, lng: 39.6015 },
-  { name: 'القصيم - بريدة (المنطقة الزراعية والتمور)', lat: 26.3260, lng: 43.9750 },
-  { name: 'الجبيل - المنطقة الصناعية الأولى', lat: 27.0097, lng: 49.5630 },
-];
-
 export default function MapPicker({
   label,
   value,
@@ -30,15 +18,9 @@ export default function MapPicker({
   lng = 46.6753, // Default Riyadh lng
   onChange,
 }: MapPickerProps) {
-  const [searchQuery, setSearchQuery] = useState('');
   const [currentLat, setCurrentLat] = useState(lat);
   const [currentLng, setCurrentLng] = useState(lng);
   const [addressText, setAddressText] = useState(value);
-
-  const [osmSuggestions, setOsmSuggestions] = useState<any[]>([]);
-  const [showOsmSuggestions, setShowOsmSuggestions] = useState(false);
-  const [showMockSuggestions, setShowMockSuggestions] = useState(false);
-  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
   const mapRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
@@ -118,7 +100,7 @@ export default function MapPicker({
         reverseGeocode(clickLat, clickLng);
       });
     } catch (err) {
-      console.error("Error initializing Leaflet map:", err);
+      console.warn("Leaflet map rendering warning:", err);
     }
 
     return () => {
@@ -129,16 +111,6 @@ export default function MapPicker({
       }
     };
   }, []);
-
-  // Sync marker and pan when currentLat/currentLng changes from suggestions
-  const handleCoordsChange = (newLat: number, newLng: number) => {
-    setCurrentLat(newLat);
-    setCurrentLng(newLng);
-    if (mapRef.current && markerRef.current) {
-      markerRef.current.setLatLng([newLat, newLng]);
-      mapRef.current.setView([newLat, newLng], 13);
-    }
-  };
 
   // Reverse Geocoding using Nominatim OpenStreetMap API
   const reverseGeocode = async (lLat: number, lLng: number) => {
@@ -158,77 +130,12 @@ export default function MapPicker({
         }
       }
     } catch (err) {
-      console.error('Reverse geocoding failed:', err);
+      console.warn('Nominatim reverse geocoding bypassed (using local coordinates labeling).', err);
     }
 
     const coordinateStr = `الموقع عند الإحداثيات (${lLat.toFixed(4)}, ${lLng.toFixed(4)})`;
     setAddressText(coordinateStr);
     onChange(coordinateStr, lLat, lLng);
-  };
-
-  // Search Address suggestions using OpenStreetMap Nominatim API
-  const handleSearchChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const queryStr = e.target.value;
-    setSearchQuery(queryStr);
-
-    if (!queryStr.trim()) {
-      setOsmSuggestions([]);
-      setShowOsmSuggestions(false);
-      setShowMockSuggestions(false);
-      return;
-    }
-
-    setLoadingSuggestions(true);
-    try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryStr)}&countrycodes=sa&accept-language=ar&limit=6`,
-        {
-          headers: {
-            'User-Agent': 'SAS-Logistics-Platform'
-          }
-        }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const suggestions = data.map((item: any) => ({
-          name: item.display_name,
-          lat: parseFloat(item.lat),
-          lng: parseFloat(item.lon),
-        }));
-        setOsmSuggestions(suggestions);
-        setShowOsmSuggestions(true);
-        setShowMockSuggestions(false);
-      } else {
-        setOsmSuggestions([]);
-        setShowOsmSuggestions(false);
-        setShowMockSuggestions(true);
-      }
-    } catch (err) {
-      console.error('OSM Nominatim Search failed:', err);
-      setOsmSuggestions([]);
-      setShowOsmSuggestions(false);
-      setShowMockSuggestions(true);
-    } finally {
-      setLoadingSuggestions(false);
-    }
-  };
-
-  // Selection handlers
-  const selectOsmSuggestion = (item: { name: string; lat: number; lng: number }) => {
-    handleCoordsChange(item.lat, item.lng);
-    setAddressText(item.name);
-    setSearchQuery('');
-    setOsmSuggestions([]);
-    setShowOsmSuggestions(false);
-    onChange(item.name, item.lat, item.lng);
-  };
-
-  const selectMockSuggestion = (place: typeof MOCK_SAUDI_PLACES[0]) => {
-    handleCoordsChange(place.lat, place.lng);
-    setAddressText(place.name);
-    setSearchQuery('');
-    setShowMockSuggestions(false);
-    onChange(place.name, place.lat, place.lng);
   };
 
   return (
@@ -241,7 +148,7 @@ export default function MapPicker({
         </span>
       </div>
 
-      {/* Input Address display with search field */}
+      {/* Input Address display */}
       <div className="relative">
         <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
           <MapPin className="w-4 h-4 text-slate-400" />
@@ -256,65 +163,6 @@ export default function MapPicker({
           placeholder="أدخل العنوان التفصيلي أو استخدم الخريطة للتحديد..."
           className="w-full text-sm pr-9 pl-4 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:outline-slate-950 font-medium"
         />
-      </div>
-
-      {/* Search Input Container */}
-      <div className="relative z-10">
-        <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
-          <Search className="w-4 h-4 text-slate-400" />
-        </div>
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={handleSearchChange}
-          placeholder="ابحث عن مدينة، حي، أو مستودع في السعودية..."
-          className="w-full text-xs pr-9 pl-4 py-2 border border-slate-200 bg-white rounded-lg focus:outline-slate-950 shadow-xs"
-        />
-
-        {/* OSM Search Autocomplete Suggestions */}
-        {showOsmSuggestions && osmSuggestions.length > 0 && (
-          <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl divide-y divide-slate-100 max-h-60 overflow-y-auto">
-            {osmSuggestions.map((item, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => selectOsmSuggestion(item)}
-                className="w-full text-right px-4 py-2.5 text-xs hover:bg-slate-50 text-slate-700 flex items-center gap-2 cursor-pointer transition-colors"
-              >
-                <Navigation className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <span className="truncate">{item.name}</span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Mock Places Autocomplete Suggestions */}
-        {showMockSuggestions && (
-          <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl divide-y divide-slate-100 max-h-60 overflow-y-auto">
-            {MOCK_SAUDI_PLACES.filter(p => p.name.includes(searchQuery)).map((place, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => selectMockSuggestion(place)}
-                className="w-full text-right px-4 py-2.5 text-xs hover:bg-slate-50 text-slate-700 flex items-center gap-2 cursor-pointer transition-colors"
-              >
-                <Compass className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <span className="font-medium text-slate-950">{place.name}</span>
-              </button>
-            ))}
-            {MOCK_SAUDI_PLACES.filter(p => p.name.includes(searchQuery)).length === 0 && (
-              <div className="px-4 py-3 text-center text-xs text-slate-400">
-                لا توجد نتائج مطابقة، سيتم حفظ ما تكتبه في العنوان اليدوي أعلاه.
-              </div>
-            )}
-          </div>
-        )}
-
-        {loadingSuggestions && (
-          <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl p-3 text-center text-xs text-slate-400">
-            جاري البحث عن العناوين...
-          </div>
-        )}
       </div>
 
       {/* Actual OSM Map Panel using Leaflet */}
