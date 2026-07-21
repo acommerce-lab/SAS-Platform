@@ -1,14 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MapPin, Search, Navigation, Info, Settings, Compass } from 'lucide-react';
-import { APIProvider, Map, AdvancedMarker, Pin } from '@vis.gl/react-google-maps';
-
-// Read API Key from build-time definition or environment variables
-const MAPS_API_KEY =
-  process.env.GOOGLE_MAPS_PLATFORM_KEY ||
-  (import.meta as any).env?.VITE_GOOGLE_MAPS_PLATFORM_KEY ||
-  '';
-
-const hasValidKey = Boolean(MAPS_API_KEY) && MAPS_API_KEY !== 'YOUR_API_KEY' && MAPS_API_KEY.length > 10;
+import { MapPin, Search, Navigation, Compass } from 'lucide-react';
+import L from 'leaflet';
 
 interface MapPickerProps {
   label: string;
@@ -37,209 +29,216 @@ export default function MapPicker({
   lat = 24.7136, // Default Riyadh lat
   lng = 46.6753, // Default Riyadh lng
   onChange,
-  placeholder = 'اختر موقعاً أو ابحث على الخريطة...',
 }: MapPickerProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [currentLat, setCurrentLat] = useState(lat);
   const [currentLng, setCurrentLng] = useState(lng);
   const [addressText, setAddressText] = useState(value);
-  const [isMapLoaded, setIsMapLoaded] = useState(false);
+
+  const [osmSuggestions, setOsmSuggestions] = useState<any[]>([]);
+  const [showOsmSuggestions, setShowOsmSuggestions] = useState(false);
   const [showMockSuggestions, setShowMockSuggestions] = useState(false);
-  const [googleSuggestions, setGoogleSuggestions] = useState<any[]>([]);
-  const [showGoogleSuggestions, setShowGoogleSuggestions] = useState(false);
-  const [hasAuthError, setHasAuthError] = useState(Boolean(typeof window !== 'undefined' && (window as any).hasGoogleMapsAuthError));
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
-  const autocompleteServiceRef = useRef<any>(null);
-  const geocoderRef = useRef<any>(null);
-
-  // Catch Maps authentication failure (e.g. ApiTargetBlockedMapError) dynamically
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      if ((window as any).hasGoogleMapsAuthError) {
-        setHasAuthError(true);
-      }
-      
-      const handleAuthFailure = () => {
-        console.warn("[MapPicker] Received google-maps-auth-failure event. Switching to independent interactive mode.");
-        setHasAuthError(true);
-      };
-
-      window.addEventListener('google-maps-auth-failure', handleAuthFailure);
-      return () => {
-        window.removeEventListener('google-maps-auth-failure', handleAuthFailure);
-      };
-    }
-  }, []);
+  const mapRef = useRef<L.Map | null>(null);
+  const markerRef = useRef<L.Marker | null>(null);
+  const containerId = useRef(`map-${Math.random().toString(36).substring(2, 9)}`);
 
   // Sync state with parent value on initialization
   useEffect(() => {
-    if (lat && lng && (lat !== 24.7136 || lng !== 46.6753)) {
+    if (lat && lng && (lat !== currentLat || lng !== currentLng)) {
       setCurrentLat(lat);
       setCurrentLng(lng);
+      if (mapRef.current && markerRef.current) {
+        markerRef.current.setLatLng([lat, lng]);
+        mapRef.current.setView([lat, lng], mapRef.current.getZoom());
+      }
     }
     if (value) {
       setAddressText(value);
     }
   }, [lat, lng, value]);
 
-  // Google Maps SDK Autocomplete & Geocoder initializers
-  const initGoogleServices = (mapInstance: any) => {
-    if (!mapInstance || !window.google) return;
+  // Leaflet initialization
+  useEffect(() => {
+    const mapElement = document.getElementById(containerId.current);
+    if (!mapElement) return;
+
     try {
-      if (!autocompleteServiceRef.current) {
-        autocompleteServiceRef.current = new window.google.maps.places.AutocompleteService();
+      // Create map
+      const map = L.map(containerId.current, {
+        center: [currentLat, currentLng],
+        zoom: 12,
+        zoomControl: true,
+      });
+      mapRef.current = map;
+
+      // Add OpenStreetMap tile layer
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a>'
+      }).addTo(map);
+
+      // Create a gorgeous custom SVG Marker Pin
+      const customPinIcon = L.divIcon({
+        html: `
+          <div class="relative flex items-center justify-center">
+            <div class="w-8 h-8 bg-amber-500 rounded-full flex items-center justify-center shadow-lg border-2 border-white animate-bounce-slow">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+            </div>
+            <div class="absolute -bottom-1 w-2 h-2 bg-amber-600 rounded-full blur-[2px] opacity-75"></div>
+          </div>
+        `,
+        className: 'custom-pin-icon',
+        iconSize: [32, 32],
+        iconAnchor: [16, 32],
+      });
+
+      // Add marker to map
+      const marker = L.marker([currentLat, currentLng], {
+        draggable: true,
+        icon: customPinIcon,
+      }).addTo(map);
+      markerRef.current = marker;
+
+      // Listen for marker drag event
+      marker.on('dragend', () => {
+        const position = marker.getLatLng();
+        setCurrentLat(position.lat);
+        setCurrentLng(position.lng);
+        reverseGeocode(position.lat, position.lng);
+      });
+
+      // Listen for map clicks
+      map.on('click', (e) => {
+        const { lat: clickLat, lng: clickLng } = e.latlng;
+        setCurrentLat(clickLat);
+        setCurrentLng(clickLng);
+        marker.setLatLng([clickLat, clickLng]);
+        reverseGeocode(clickLat, clickLng);
+      });
+    } catch (err) {
+      console.error("Error initializing Leaflet map:", err);
+    }
+
+    return () => {
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+        markerRef.current = null;
       }
-      if (!geocoderRef.current) {
-        geocoderRef.current = new window.google.maps.Geocoder();
-      }
-      setIsMapLoaded(true);
-    } catch (e) {
-      console.warn('Failed to initialize Google Maps services:', e);
+    };
+  }, []);
+
+  // Sync marker and pan when currentLat/currentLng changes from suggestions
+  const handleCoordsChange = (newLat: number, newLng: number) => {
+    setCurrentLat(newLat);
+    setCurrentLng(newLng);
+    if (mapRef.current && markerRef.current) {
+      markerRef.current.setLatLng([newLat, newLng]);
+      mapRef.current.setView([newLat, newLng], 13);
     }
   };
 
-  // Handle textual search queries
+  // Reverse Geocoding using Nominatim OpenStreetMap API
+  const reverseGeocode = async (lLat: number, lLng: number) => {
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lLat}&lon=${lLng}&accept-language=ar`, {
+        headers: {
+          'User-Agent': 'SAS-Logistics-Platform'
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.display_name) {
+          const friendlyName = data.display_name;
+          setAddressText(friendlyName);
+          onChange(friendlyName, lLat, lLng);
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('Reverse geocoding failed:', err);
+    }
+
+    const coordinateStr = `الموقع عند الإحداثيات (${lLat.toFixed(4)}, ${lLng.toFixed(4)})`;
+    setAddressText(coordinateStr);
+    onChange(coordinateStr, lLat, lLng);
+  };
+
+  // Search Address suggestions using OpenStreetMap Nominatim API
   const handleSearchChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const queryStr = e.target.value;
     setSearchQuery(queryStr);
 
     if (!queryStr.trim()) {
-      setGoogleSuggestions([]);
-      setShowGoogleSuggestions(false);
+      setOsmSuggestions([]);
+      setShowOsmSuggestions(false);
       setShowMockSuggestions(false);
       return;
     }
 
-    if (hasValidKey && !hasAuthError && autocompleteServiceRef.current && window.google) {
-      // Query Google Places Autocomplete API safely
-      try {
-        autocompleteServiceRef.current.getPlacePredictions(
-          {
-            input: queryStr,
-            componentRestrictions: { country: 'sa' },
-            language: 'ar',
-          },
-          (predictions: any, status: any) => {
-            if (status === window.google.maps.places.PlacesServiceStatus.OK && predictions) {
-              setGoogleSuggestions(predictions);
-              setShowGoogleSuggestions(true);
-            } else {
-              setGoogleSuggestions([]);
-              setShowGoogleSuggestions(false);
-            }
+    setLoadingSuggestions(true);
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryStr)}&countrycodes=sa&accept-language=ar&limit=6`,
+        {
+          headers: {
+            'User-Agent': 'SAS-Logistics-Platform'
           }
-        );
-      } catch (err) {
-        console.error('Autocomplete prediction error:', err);
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const suggestions = data.map((item: any) => ({
+          name: item.display_name,
+          lat: parseFloat(item.lat),
+          lng: parseFloat(item.lon),
+        }));
+        setOsmSuggestions(suggestions);
+        setShowOsmSuggestions(true);
+        setShowMockSuggestions(false);
+      } else {
+        setOsmSuggestions([]);
+        setShowOsmSuggestions(false);
+        setShowMockSuggestions(true);
       }
-    } else {
-      // Fallback: Filter mock Saudi places based on query
+    } catch (err) {
+      console.error('OSM Nominatim Search failed:', err);
+      setOsmSuggestions([]);
+      setShowOsmSuggestions(false);
       setShowMockSuggestions(true);
+    } finally {
+      setLoadingSuggestions(false);
     }
   };
 
-  // Select a suggestion from google places
-  const selectGoogleSuggestion = (placeId: string, description: string) => {
-    if (!geocoderRef.current || !window.google) return;
-    
-    geocoderRef.current.geocode({ placeId }, (results: any, status: any) => {
-      if (status === window.google.maps.GeocoderStatus.OK && results?.[0]) {
-        const loc = results[0].geometry.location;
-        const newLat = loc.lat();
-        const newLng = loc.lng();
-        
-        setCurrentLat(newLat);
-        setCurrentLng(newLng);
-        setAddressText(description);
-        setSearchQuery('');
-        setShowGoogleSuggestions(false);
-        onChange(description, newLat, newLng);
-      }
-    });
+  // Selection handlers
+  const selectOsmSuggestion = (item: { name: string; lat: number; lng: number }) => {
+    handleCoordsChange(item.lat, item.lng);
+    setAddressText(item.name);
+    setSearchQuery('');
+    setOsmSuggestions([]);
+    setShowOsmSuggestions(false);
+    onChange(item.name, item.lat, item.lng);
   };
 
-  // Select a suggestion from mock places
   const selectMockSuggestion = (place: typeof MOCK_SAUDI_PLACES[0]) => {
-    setCurrentLat(place.lat);
-    setCurrentLng(place.lng);
+    handleCoordsChange(place.lat, place.lng);
     setAddressText(place.name);
     setSearchQuery('');
     setShowMockSuggestions(false);
     onChange(place.name, place.lat, place.lng);
   };
 
-  // When Google Map marker is dragged
-  const handleMarkerDragEnd = (e: any) => {
-    if (!e.latLng) return;
-    const newLat = e.latLng.lat();
-    const newLng = e.latLng.lng();
-    
-    setCurrentLat(newLat);
-    setCurrentLng(newLng);
-
-    if (geocoderRef.current && window.google) {
-      // Reverse geocode to get friendly text
-      geocoderRef.current.geocode({ location: { lat: newLat, lng: newLng } }, (results: any, status: any) => {
-        if (status === window.google.maps.GeocoderStatus.OK && results?.[0]) {
-          const address = results[0].formatted_address;
-          setAddressText(address);
-          onChange(address, newLat, newLng);
-        } else {
-          const coordinateStr = `الموقع عند الإحداثيات (${newLat.toFixed(4)}, ${newLng.toFixed(4)})`;
-          setAddressText(coordinateStr);
-          onChange(coordinateStr, newLat, newLng);
-        }
-      });
-    } else {
-      const coordinateStr = `إحداثيات مخصصة (${newLat.toFixed(4)}, ${newLng.toFixed(4)})`;
-      setAddressText(coordinateStr);
-      onChange(coordinateStr, newLat, newLng);
-    }
-  };
-
-  // Map clicked to position marker
-  const handleMapClick = (e: any) => {
-    if (!e.detail?.latLng) return;
-    const newLat = e.detail.latLng.lat;
-    const newLng = e.detail.latLng.lng;
-    
-    setCurrentLat(newLat);
-    setCurrentLng(newLng);
-
-    if (geocoderRef.current && window.google) {
-      geocoderRef.current.geocode({ location: { lat: newLat, lng: newLng } }, (results: any, status: any) => {
-        if (status === window.google.maps.GeocoderStatus.OK && results?.[0]) {
-          const address = results[0].formatted_address;
-          setAddressText(address);
-          onChange(address, newLat, newLng);
-        }
-      });
-    } else {
-      const coordinateStr = `إحداثيات مخصصة (${newLat.toFixed(4)}, ${newLng.toFixed(4)})`;
-      setAddressText(coordinateStr);
-      onChange(coordinateStr, newLat, newLng);
-    }
-  };
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <label className="block text-xs font-bold text-slate-700">{label}</label>
-        {hasValidKey && !hasAuthError ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-            نظام الخرائط الحية مفعّل
-          </span>
-        ) : hasValidKey && hasAuthError ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-            النمط التفاعلي المستقل (مفتاح محظور/غير نشط)
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
-            النمط التفاعلي المستقل
-          </span>
-        )}
+        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-100">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+          خريطة OpenStreetMap التفاعلية نشطة
+        </span>
       </div>
 
       {/* Input Address display with search field */}
@@ -260,7 +259,7 @@ export default function MapPicker({
       </div>
 
       {/* Search Input Container */}
-      <div className="relative">
+      <div className="relative z-10">
         <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
           <Search className="w-4 h-4 text-slate-400" />
         </div>
@@ -272,18 +271,18 @@ export default function MapPicker({
           className="w-full text-xs pr-9 pl-4 py-2 border border-slate-200 bg-white rounded-lg focus:outline-slate-950 shadow-xs"
         />
 
-        {/* Google Places Autocomplete Suggestions */}
-        {showGoogleSuggestions && googleSuggestions.length > 0 && (
+        {/* OSM Search Autocomplete Suggestions */}
+        {showOsmSuggestions && osmSuggestions.length > 0 && (
           <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl divide-y divide-slate-100 max-h-60 overflow-y-auto">
-            {googleSuggestions.map((item) => (
+            {osmSuggestions.map((item, idx) => (
               <button
-                key={item.place_id}
+                key={idx}
                 type="button"
-                onClick={() => selectGoogleSuggestion(item.place_id, item.description)}
+                onClick={() => selectOsmSuggestion(item)}
                 className="w-full text-right px-4 py-2.5 text-xs hover:bg-slate-50 text-slate-700 flex items-center gap-2 cursor-pointer transition-colors"
               >
                 <Navigation className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <span className="truncate">{item.description}</span>
+                <span className="truncate">{item.name}</span>
               </button>
             ))}
           </div>
@@ -310,86 +309,23 @@ export default function MapPicker({
             )}
           </div>
         )}
+
+        {loadingSuggestions && (
+          <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl p-3 text-center text-xs text-slate-400">
+            جاري البحث عن العناوين...
+          </div>
+        )}
       </div>
 
-      {/* Actual Google Map Panel */}
-      {hasValidKey && !hasAuthError ? (
-        <div className="relative h-48 w-full rounded-xl overflow-hidden border border-slate-200 shadow-inner bg-slate-100">
-          <APIProvider apiKey={MAPS_API_KEY} version="weekly">
-            <Map
-              center={{ lat: currentLat, lng: currentLng }}
-              zoom={12}
-              onClick={handleMapClick}
-              mapId="DEMO_MAP_ID"
-              internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-              onMapsLoaded={(e) => initGoogleServices(e)}
-              style={{ width: '100%', height: '100%' }}
-            >
-              <AdvancedMarker
-                position={{ lat: currentLat, lng: currentLng }}
-                draggable={true}
-                onDragEnd={handleMarkerDragEnd}
-              >
-                <Pin background="#d97706" glyphColor="#fff" borderColor="#78350f" />
-              </AdvancedMarker>
-            </Map>
-          </APIProvider>
-
-          {/* Quick instructions tag */}
-          <div className="absolute bottom-2 right-2 bg-slate-900/80 text-[10px] text-white px-2 py-1 rounded backdrop-blur-xs">
-            انقر في أي مكان أو اسحب الدبوس البرتقالي لتحديث العنوان
-          </div>
+      {/* Actual OSM Map Panel using Leaflet */}
+      <div className="relative h-56 w-full rounded-xl overflow-hidden border border-slate-200 shadow-inner bg-slate-100 z-0">
+        <div id={containerId.current} className="w-full h-full" />
+        
+        {/* Quick instructions tag */}
+        <div className="absolute bottom-2 right-2 bg-slate-900/80 text-[10px] text-white px-2 py-1 rounded backdrop-blur-xs z-[1000]">
+          انقر في أي مكان أو اسحب الدبوس لتحديث العنوان
         </div>
-      ) : (
-        /* Highly styled mock maps interface with clickable coordinate grid */
-        <div className="relative h-48 w-full rounded-xl overflow-hidden border border-slate-200 shadow-inner bg-slate-950 text-slate-300 flex flex-col justify-between p-4">
-          
-          {/* Subtle Grid illustration backdrop */}
-          <div className="absolute inset-0 opacity-15 pointer-events-none" style={{
-            backgroundImage: `radial-gradient(circle, #f59e0b 1px, transparent 1px)`,
-            backgroundSize: '16px 16px'
-          }} />
-          
-          {/* Mock Map graphical elements */}
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            {/* Concentric rings to simulate radar/location */}
-            <div className="w-32 h-32 rounded-full border border-amber-500/20 animate-ping absolute duration-1000" />
-            <div className="w-16 h-16 rounded-full border border-amber-500/30 absolute" />
-            <div className="w-2.5 h-2.5 rounded-full bg-amber-500 absolute animate-pulse shadow-lg shadow-amber-500/50" />
-            
-            {/* Visual simulation of routes */}
-            <svg className="absolute w-full h-full opacity-30 stroke-amber-500 stroke-dasharray-4" viewBox="0 0 100 100" preserveAspectRatio="none">
-              <path d="M 0,20 Q 30,50 60,30 T 100,80" fill="none" strokeWidth="0.5" />
-              <path d="M 10,90 Q 50,40 90,10" fill="none" strokeWidth="0.3" />
-            </svg>
-          </div>
-
-          <div className="relative z-10 flex items-start justify-between">
-            <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-2 max-w-[70%]">
-              <span className="block text-[9px] font-bold text-amber-500 uppercase tracking-widest">إحداثيات محددة حالياً</span>
-              <span className="block text-[11px] font-mono font-medium text-slate-100 mt-0.5">
-                خط العرض: {currentLat.toFixed(5)} | خط الطول: {currentLng.toFixed(5)}
-              </span>
-            </div>
-
-            <div className="p-1.5 bg-slate-900/90 border border-slate-800 rounded-lg text-slate-400 flex items-center gap-1 text-[10px]">
-              <Settings className="w-3 h-3 text-amber-500 shrink-0" />
-              <span>معاينة خريطة مستقلة</span>
-            </div>
-          </div>
-
-          {/* Fallback configuration hint banner */}
-          <div className="relative z-10 bg-slate-900/95 border border-amber-900/40 p-2.5 rounded-lg flex items-start gap-2">
-            <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-            <div className="space-y-0.5">
-              <span className="block text-[10px] font-black text-amber-500">ملاحظة لإدارة المنصة:</span>
-              <p className="text-[9px] text-slate-400 leading-relaxed">
-                لتفعيل خرائط Google Maps والبحث التلقائي بالـ GPS وحساب المسافات الفعلية آلياً، يرجى التوجه إلى <strong className="text-amber-500">الإعدادات (أعلى اليمين) ⚙️ ← الأسرار</strong> وإضافة مفتاح <code>GOOGLE_MAPS_PLATFORM_KEY</code>.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
